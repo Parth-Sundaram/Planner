@@ -45,6 +45,39 @@ def minutes_between(a: datetime, b: datetime) -> int:
     return int((b - a).total_seconds() // 60)
 
 
+# ---- Exam prep from confidence -------------------------------------------------
+# confidence 1 (lost) .. 5 (ready) -> (prep minutes, days before the deadline to spread it over)
+CONFIDENCE_PREP = {1: (600, 7), 2: (420, 6), 3: (240, 4), 4: (120, 3), 5: (60, 1)}
+
+
+def apply_confidence(t: Task, level: int | None) -> None:
+    """Set an exam/quiz's prep time from how ready you feel. You can still edit the minutes after."""
+    t.confidence = level
+    if level is None:
+        t.max_per_day = None
+        return
+    minutes, days = CONFIDENCE_PREP[level]
+    t.est_minutes = max(minutes, t.done_minutes)
+    t.needs_estimate = False
+    t.max_block = min(t.max_block or 90, 90)  # study in sittings of at most 90 minutes
+    t.max_per_day = None  # derived from remaining time at plan time
+
+
+def prep_window(t: Task, day_start: time, now: datetime) -> tuple[datetime | None, int | None]:
+    """For a task with a confidence level: earliest start and per-day cap that spread the prep
+    evenly over the days left in its window (the deadline day itself counts if it's after class)."""
+    if not t.confidence:
+        return t.earliest_start, t.max_per_day
+    _, days = CONFIDENCE_PREP[t.confidence]
+    start = datetime.combine(t.due.date() - timedelta(days=days), day_start)
+    first = max(start.date(), now.date())
+    days_left = max(1, (t.due.date() - first).days + (1 if t.due.time() >= time(12) else 0))
+    left = max(0, t.est_minutes - t.done_minutes)
+    cap = t.max_per_day or (-(-left // days_left // 15) * 15 + 15)  # rounded up, plus a little slack
+    es = max(start, t.earliest_start) if t.earliest_start else start
+    return es, cap
+
+
 # ---- Replanning ----------------------------------------------------------------
 
 def _rules(db: Session) -> list[dict]:
@@ -69,7 +102,7 @@ def replan(db: Session, now: datetime | None = None) -> dict:
     # 2. Everything that stays is busy time: calendar events, locked/checked-in blocks,
     #    "something came up" blocks, and anything currently in progress.
     kept = db.scalars(select(Block).where(Block.end > now, Block.start < horizon_end)).all()
-    busy = [S.Interval(max(b.start, now), b.end) for b in kept]
+    busy = [S.Interval(max(b.start, now), b.end) for b in kept if b.status != "skipped"]  # a skipped slot is free again
     for e in db.scalars(select(ExternalEvent).where(ExternalEvent.end > now, ExternalEvent.start < horizon_end)):
         busy.append(S.Interval(max(e.start, now), e.end))
 
@@ -95,6 +128,7 @@ def replan(db: Session, now: datetime | None = None) -> dict:
         return max(0, t.est_minutes - t.done_minutes - placed), placed
 
     specs = []
+    day_start_t = hm(cfg["day_start"])
     for t in open_tasks:
         if t.id in children:
             continue  # parents are scheduled through their subtasks
@@ -116,8 +150,9 @@ def replan(db: Session, now: datetime | None = None) -> dict:
             splittable=t.splittable, min_block=t.min_block, max_block=t.max_block,
             min_total=(max(0, t.min_total_minutes - t.done_minutes - placed)
                        if t.min_total_minutes is not None else None),
-            earliest_start=t.earliest_start or (parent.earliest_start if parent else None),
-            group=parent.id if parent else None, seq=t.position, sequential=sequential))
+            earliest_start=prep_window(t, day_start_t, now)[0] or (parent.earliest_start if parent else None),
+            group=parent.id if parent else None, seq=t.position, sequential=sequential,
+            max_per_day=prep_window(t, day_start_t, now)[1]))
 
     result = S.plan(now, horizon_end, hm(cfg["day_start"]), hm(cfg["day_end"]),
                     busy, routines, specs, routine_skip)
@@ -221,6 +256,45 @@ def move_block(db: Session, block_id: int, start: datetime, end: datetime) -> No
 def unlock_block(db: Session, block_id: int) -> None:
     b = db.get(Block, block_id)
     b.locked = False
+    replan(db)
+
+
+def not_now(db: Session, block_id: int) -> None:
+    """Drop a work block and push that task's work to after it. The slot goes to other work."""
+    b = db.get(Block, block_id)
+    if b is None or b.kind != "task":
+        raise ValueError("Not now only applies to work blocks")
+    t = db.get(Task, b.task_id)
+    t.earliest_start = max(t.earliest_start or b.end, b.end)
+    db.delete(b)
+    replan(db)
+
+
+def skip_routine(db: Session, block_id: int) -> None:
+    """Skip a routine for that day only. The block stays (as skipped) so it isn't placed again."""
+    b = db.get(Block, block_id)
+    if b is None or b.kind != "routine":
+        raise ValueError("Skip only applies to routines")
+    b.status, b.locked = "skipped", False
+    replan(db)
+
+
+def restore_block(db: Session, block_id: int) -> None:
+    """Undo a skip: the routine goes back into the plan for that day."""
+    b = db.get(Block, block_id)
+    if b.kind == "routine":
+        db.delete(b)
+    else:
+        b.status, b.done_minutes = "planned", 0
+    replan(db)
+
+
+def remove_block(db: Session, block_id: int) -> None:
+    """Delete a "something came up" block (or any busy block) outright."""
+    b = db.get(Block, block_id)
+    if b.kind != "busy":
+        raise ValueError("Use Not now or Skip for planned blocks")
+    db.delete(b)
     replan(db)
 
 

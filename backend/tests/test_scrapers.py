@@ -46,5 +46,17 @@ def test_sync_keeps_user_estimates_and_skips_past():
     t = s.scalar(select(Task).where(Task.title == "CPSConversion"))
     t.est_minutes = 240; s.commit()
     r2 = sync_items(s, items, now)
-    assert r2 == {"created": 0, "updated": 0}
+    assert r2 == {"created": 0, "suggested": 0, "updated": 0}
     assert s.scalar(select(Task).where(Task.title == "CPSConversion")).est_minutes == 240
+
+
+def test_csse304_also_reads_raw_markdown_tables():
+    md = """<html><body><pre>
+| Session | Reading | Topics | Materials | Videos |
+|---|---|---|---|---|
+| 26 Tue 20 Oct 2026 | EoPL 3.5 | CPS | [CPSConversion](https://x/y) DUE Tue 20 Oct 2026 11:59 pm | |
+| | | | [Interpreter-DefineAndSet](https://x/z) DUE Sun 25 Oct 2026 11:59 pm | |
+</pre></body></html>"""
+    items = by_title(parse_csse304(md, TODAY))
+    assert set(items) == {"CPSConversion", "Interpreter-DefineAndSet"}
+    assert items["CPSConversion"].due == datetime(2026, 10, 20, 23, 59)

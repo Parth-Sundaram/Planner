@@ -132,3 +132,12 @@ def test_unordered_subtasks_can_interleave():
     subs = [task(20 + i, f"part{i}", 60, due, group=2, seq=i, sequential=False) for i in range(2)]
     r = run(subs)
     assert task_minutes(r, 20) == 60 and task_minutes(r, 21) == 60
+
+
+def test_no_sliver_left_over_after_long_chunks():
+    from planner.scheduler import Interval, TaskSpec, plan
+    now = datetime(2026, 10, 19, 8, 0)
+    t = TaskSpec(1, "Long", 185, now + timedelta(days=2), now + timedelta(days=2), max_block=90, min_block=30)
+    r = plan(now, now + timedelta(days=3), time(8), time(23), [], [], [t])
+    lengths = sorted(int((b.end - b.start).total_seconds() // 60) for b in r.blocks)
+    assert sum(lengths) == 185 and min(lengths) >= 30

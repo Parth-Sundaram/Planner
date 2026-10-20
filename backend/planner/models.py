@@ -4,9 +4,9 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, String, Text,
+from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Integer, String, Text,
                         create_engine, event, inspect, text)
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 
 class Base(DeclarativeBase):
@@ -28,7 +28,7 @@ class Task(Base):
     max_block: Mapped[int] = mapped_column(Integer, default=180)
     tags: Mapped[str] = mapped_column(String(200), default="")       # comma separated, no '#'
     earliest_start: Mapped[datetime | None] = mapped_column(DateTime)
-    status: Mapped[str] = mapped_column(String(20), default="open")  # open | done
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open | done | suggested | dismissed
     source: Mapped[str] = mapped_column(String(50), default="manual")  # manual | google_tasks | scrape:csse304 ...
     external_id: Mapped[str | None] = mapped_column(String(300), unique=True)
     needs_estimate: Mapped[bool] = mapped_column(Boolean, default=False)  # imported with a default duration
@@ -39,6 +39,11 @@ class Task(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
     position: Mapped[int] = mapped_column(Integer, default=0)
     sequential: Mapped[bool] = mapped_column(Boolean, default=True)
+    course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id", ondelete="SET NULL"))
+    # Exams/quizzes: how ready you feel, 1 (not at all) .. 5 (very). Sets prep time and how
+    # many days before the deadline the prep is spread over.
+    confidence: Mapped[int | None] = mapped_column(Integer)
+    max_per_day: Mapped[int | None] = mapped_column(Integer)  # cap on this task's minutes per day
 
     @property
     def tag_list(self) -> list[str]:
@@ -98,6 +103,52 @@ class ExternalEvent(Base):
     end: Mapped[datetime] = mapped_column(DateTime)
 
 
+class Course(Base):
+    """A course schedule page to pull deadlines from. `parser` is a built-in reader
+    (csse304, csse313) or "ai" for Gemini extraction on any page."""
+    __tablename__ = "courses"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True)
+    name: Mapped[str] = mapped_column(String(100))
+    url: Mapped[str] = mapped_column(String(500), default="")
+    parser: Mapped[str] = mapped_column(String(30), default="ai")   # "none" = no schedule page
+    render_js: Mapped[bool] = mapped_column(Boolean, default=False)
+    class_days: Mapped[str] = mapped_column(String(7), default="MTRF")
+    class_time: Mapped[str] = mapped_column(String(5), default="10:00")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    review: Mapped[bool] = mapped_column(Boolean, default=True)   # new items arrive as suggestions
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_result: Mapped[str] = mapped_column(Text, default="")    # JSON report of the last sync
+    page_hash: Mapped[str | None] = mapped_column(String(64))     # skip AI calls when the page hasn't changed
+    color: Mapped[str] = mapped_column(String(20), default="blue")
+    instructor: Mapped[str] = mapped_column(String(100), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    links: Mapped[str] = mapped_column(Text, default="[]")         # JSON [{"label", "url"}]: repos, Moodle...
+    target_grade: Mapped[float | None] = mapped_column(Float)
+
+
+class GradeCategory(Base):
+    """A weighted part of a course grade, e.g. Homework 30%."""
+    __tablename__ = "grade_categories"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(100))
+    weight: Mapped[float] = mapped_column(Float, default=0)
+    drop_lowest: Mapped[int] = mapped_column(Integer, default=0)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    items: Mapped[list["GradeItem"]] = relationship(order_by="GradeItem.id", cascade="all, delete-orphan",
+                                                    passive_deletes=True)
+
+
+class GradeItem(Base):
+    __tablename__ = "grade_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey("grade_categories.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(200))
+    score: Mapped[float | None] = mapped_column(Float)   # None = not graded yet
+    out_of: Mapped[float] = mapped_column(Float, default=100)
+
+
 class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
@@ -128,12 +179,10 @@ def make_session_factory(url: str | None = None):
         url = url.replace("postgres://", "postgresql+psycopg://", 1)
     elif url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+psycopg://", 1)
-    
     if url.startswith("sqlite"):
-            engine = create_engine(url, future=True)
-    else:
+        engine = create_engine(url, future=True)
+    else:  # Neon closes idle connections; test and recycle them so a stale one is never used
         engine = create_engine(url, future=True, pool_pre_ping=True, pool_recycle=240)
-        
     if engine.dialect.name == "sqlite":
         @event.listens_for(engine, "connect")
         def _fk_on(conn, _):  # SQLite ignores ON DELETE CASCADE unless this is on

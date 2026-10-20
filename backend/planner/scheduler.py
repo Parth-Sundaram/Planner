@@ -61,6 +61,7 @@ class TaskSpec:
     group: int | None = None      # parent task id, for subtasks
     seq: int = 0                  # position within the parent
     sequential: bool = False      # subtasks must happen in order
+    max_per_day: int | None = None  # spread work out: at most this many minutes per day
 
 
 @dataclass
@@ -176,17 +177,23 @@ def place_routines(now: datetime, horizon_end: datetime, routines: list[RoutineS
 
 
 def _allocate(task: TaskSpec, minutes: int, deadline: datetime, now: datetime,
-              free: list[Interval]) -> tuple[list[PlannedBlock], int, list[Interval]]:
+              free: list[Interval], existing: list[PlannedBlock] | None = None) -> tuple[list[PlannedBlock], int, list[Interval]]:
     """Greedily fill the earliest free time before `deadline`. Returns blocks, minutes left over."""
     blocks: list[PlannedBlock] = []
     left = minutes
     start_floor = max(round_up(now), task.earliest_start or now)
+    per_day: dict[date, int] = {}
+    if task.max_per_day:
+        for b in existing or []:
+            per_day[b.start.date()] = per_day.get(b.start.date(), 0) + int((b.end - b.start).total_seconds() // 60)
     for f in list(free):
         if left <= 0:
             break
         s = max(f.start, start_floor)
         e = min(f.end, deadline)
         avail = int((e - s).total_seconds() // 60) if e > s else 0
+        if task.max_per_day and avail > 0:
+            avail = min(avail, max(0, task.max_per_day - per_day.get(s.date(), 0)))
         if not task.splittable:
             if avail >= left:
                 blocks.append(PlannedBlock(task.title, s, s + timedelta(minutes=left), "task", task_id=task.id))
@@ -194,6 +201,9 @@ def _allocate(task: TaskSpec, minutes: int, deadline: datetime, now: datetime,
             continue
         while left > 0 and avail > 0:
             chunk = min(left, task.max_block, avail)
+            tail = left - chunk
+            if 0 < tail < task.min_block and chunk - (task.min_block - tail) >= task.min_block:
+                chunk -= task.min_block - tail  # don't leave a sliver for later
             # Don't create a sliver shorter than min_block unless it finishes the task.
             if chunk < task.min_block and chunk < left:
                 break
@@ -201,6 +211,7 @@ def _allocate(task: TaskSpec, minutes: int, deadline: datetime, now: datetime,
             if chunk <= 0:
                 break
             blocks.append(PlannedBlock(task.title, s, s + timedelta(minutes=chunk), "task", task_id=task.id))
+            per_day[s.date()] = per_day.get(s.date(), 0) + chunk
             s += timedelta(minutes=chunk)
             left -= chunk
             avail -= chunk
@@ -232,7 +243,7 @@ def _schedule_tasks(tasks: list[TaskSpec], now: datetime, free: list[Interval],
             short_soft[t.id] = left
             if t.effective_due < t.due:
                 # Soft deadline missed: let the rest spill up to the real deadline.
-                more, left, free = _allocate(t, left, t.due, now, free)
+                more, left, free = _allocate(t, left, t.due, now, free, existing=got)
                 blocks += more
             if left > 0:
                 short_hard[t.id] = left

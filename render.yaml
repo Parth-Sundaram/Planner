@@ -12,6 +12,8 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      - key: GEMINI_API_KEY        # free key from aistudio.google.com, for AI extraction of course pages
+        sync: false
       - key: ALLOWED_EMAILS        # your Google account email
         sync: false
       - key: FLASK_SECRET_KEY

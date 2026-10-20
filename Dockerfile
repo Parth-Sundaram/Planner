@@ -15,4 +15,4 @@ COPY backend/ backend/
 COPY --from=web /app/frontend/dist frontend/dist
 WORKDIR /app/backend
 ENV PYTHONUNBUFFERED=1
-CMD gunicorn wsgi:app --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 120
+CMD gunicorn wsgi:app --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 180

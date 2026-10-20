@@ -12,18 +12,21 @@ from flask import Flask, abort, g, jsonify, redirect, request, send_from_directo
 from sqlalchemy import select
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import gsync, service
-from .models import Block, ExternalEvent, Routine, Rule, Task, make_session_factory
+from . import grades, gsync, scrapers, service
+from .models import (Block, Course, ExternalEvent, GradeCategory, GradeItem, Routine, Rule, Task,
+                     make_session_factory)
 
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")  # Google may return scopes in a different order
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 TASK_FIELDS = {"title", "course", "est_minutes", "done_minutes", "min_total_minutes", "priority",
-               "splittable", "min_block", "max_block", "notes", "status", "position", "sequential"}
+               "splittable", "min_block", "max_block", "notes", "status", "position", "sequential", "max_per_day"}
 ROUTINE_FIELDS = {"title", "days", "window_start", "window_end", "duration", "kind", "active"}
 RULE_FIELDS = {"tag", "weekday", "time", "description"}
-SETTING_KEYS = {"timezone", "day_start", "day_end", "horizon_days", "busy_calendar_ids", "courses"}
+SETTING_KEYS = {"timezone", "day_start", "day_end", "horizon_days", "busy_calendar_ids"}
+COURSE_FIELDS = {"name", "url", "parser", "render_js", "class_days", "class_time", "enabled", "review",
+                 "color", "instructor", "notes", "target_grade"}
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -47,6 +50,8 @@ def task_json(t: Task, rules) -> dict:
         "earliest_start": iso(t.earliest_start), "status": t.status, "source": t.source,
         "needs_estimate": t.needs_estimate, "notes": t.notes,
         "parent_id": t.parent_id, "position": t.position, "sequential": t.sequential,
+        "course_id": t.course_id, "confidence": t.confidence, "max_per_day": t.max_per_day,
+        "is_study": t.title.lower().startswith("study") or any(w in t.title.lower() for w in ("exam", "quiz", "midterm", "final")),
     }
 
 
@@ -62,10 +67,27 @@ def task_tree_json(db, t: Task, rules) -> dict:
     return d
 
 
-def block_json(b: Block) -> dict:
+def block_json(b: Block, tasks: dict | None = None) -> dict:
+    t = tasks.get(b.task_id) if tasks and b.task_id else None
     return {"id": b.id, "title": b.title, "start": iso(b.start), "end": iso(b.end), "kind": b.kind,
             "task_id": b.task_id, "routine_id": b.routine_id, "locked": b.locked,
-            "status": b.status, "done_minutes": b.done_minutes}
+            "status": b.status, "done_minutes": b.done_minutes,
+            "course_id": t.course_id if t else None, "parent_task_id": t.parent_id if t else None}
+
+
+def blocks_json(db, blocks) -> list[dict]:
+    ids = {b.task_id for b in blocks if b.task_id}
+    tasks = {t.id: t for t in db.scalars(select(Task).where(Task.id.in_(ids)))} if ids else {}
+    return [block_json(b, tasks) for b in blocks]
+
+
+def course_json(c: Course) -> dict:
+    return {"id": c.id, "code": c.code, "name": c.name, "url": c.url, "parser": c.parser,
+            "parser_label": scrapers.PARSER_LABELS.get(c.parser, c.parser), "render_js": c.render_js,
+            "class_days": c.class_days, "class_time": c.class_time, "enabled": c.enabled, "review": c.review,
+            "last_sync_at": iso(c.last_sync_at), "last_result": json.loads(c.last_result or "{}"),
+            "color": c.color, "instructor": c.instructor, "notes": c.notes,
+            "links": json.loads(c.links or "[]"), "target_grade": c.target_grade}
 
 
 def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
@@ -90,6 +112,19 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             if exc:
                 db.rollback()
             db.close()
+
+    @app.errorhandler(Exception)
+    def api_error(e):
+        """API errors always come back as JSON with a readable message."""
+        from werkzeug.exceptions import HTTPException
+        if isinstance(e, HTTPException):
+            if not request.path.startswith("/api/"):
+                return e
+            return jsonify(error=e.description), e.code
+        app.logger.exception("Unhandled error on %s", request.path)
+        if not request.path.startswith("/api/"):
+            return "Internal Server Error", 500
+        return jsonify(error=f"Server error: {type(e).__name__}: {e}"[:300]), 500
 
     def login_required(fn):
         @wraps(fn)
@@ -175,12 +210,19 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
     def list_tasks():
         status = request.args.get("status", "open")
         q = select(Task).where(Task.parent_id.is_(None)).order_by(Task.due)
-        if status != "all":
+        if status == "all":
+            q = q.where(Task.status.in_(["open", "done"]))
+        else:
             q = q.where(Task.status == status)
+        if request.args.get("course_id"):
+            q = q.where(Task.course_id == int(request.args["course_id"]))
         r = rules()
         return jsonify([task_tree_json(g.db, t, r) for t in g.db.scalars(q)])
 
     def apply_task_fields(t: Task, data: dict):
+        if "confidence" in data:
+            level = data["confidence"]
+            service.apply_confidence(t, int(level) if level else None)
         for k in TASK_FIELDS & data.keys():
             setattr(t, k, data[k])
         if "due" in data:
@@ -190,6 +232,9 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         if "tags" in data:
             tags = data["tags"]
             t.tags = ",".join(x.strip().lstrip("#").lower() for x in (tags if isinstance(tags, list) else tags.split(",")) if x.strip())
+        if "course_id" in data:
+            c = g.db.get(Course, data["course_id"]) if data["course_id"] else None
+            t.course_id, t.course = (c.id, c.name) if c else (None, None)
         if "est_minutes" in data:
             t.needs_estimate = False
 
@@ -212,7 +257,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             return jsonify(error="title and due are required"), 400
         t = Task(title=data["title"], due=parse_dt(data["due"]))
         if parent:
-            t.parent_id, t.course = parent.id, parent.course
+            t.parent_id, t.course, t.course_id = parent.id, parent.course, parent.course_id
             t.position = service.next_position(g.db, parent.id)
             if parent.status == "done":
                 parent.status = "open"
@@ -247,6 +292,23 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         g.db.commit()
         return jsonify(plan=service.replan(g.db))
 
+    @app.get("/api/tasks/<int:tid>")
+    @login_required
+    def get_task(tid):
+        t = g.db.get(Task, tid) or abort(404)
+        ids = [t.id] + [c.id for c in service.subtasks_of(g.db, t.id)]
+        bl = g.db.scalars(select(Block).where(Block.task_id.in_(ids)).order_by(Block.start)).all()
+        return jsonify(task=task_tree_json(g.db, t, rules()), blocks=blocks_json(g.db, bl))
+
+    @app.post("/api/suggestions/accept-all")
+    @login_required
+    def accept_all():
+        n = 0
+        for t in g.db.scalars(select(Task).where(Task.status == "suggested")):
+            t.status, n = "open", n + 1
+        g.db.commit()
+        return jsonify(accepted=n, plan=service.replan(g.db))
+
     @app.post("/api/tasks/<int:tid>/finish")
     @login_required
     def finish_task(tid):
@@ -264,7 +326,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         end = parse_dt(request.args.get("end")) or start + timedelta(days=7)
         blocks = g.db.scalars(select(Block).where(Block.end > start, Block.start < end).order_by(Block.start)).all()
         events = g.db.scalars(select(ExternalEvent).where(ExternalEvent.end > start, ExternalEvent.start < end)).all()
-        return jsonify(blocks=[block_json(b) for b in blocks],
+        return jsonify(blocks=blocks_json(g.db, blocks),
                        events=[{"id": e.id, "title": e.title, "start": iso(e.start), "end": iso(e.end)} for e in events])
 
     @app.patch("/api/blocks/<int:bid>")
@@ -301,6 +363,34 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             return jsonify(error="status must be done, partial or skipped"), 400
         return jsonify(ok=True)
 
+    def block_action(bid, fn, *args):
+        g.db.get(Block, bid) or abort(404)
+        try:
+            fn(g.db, bid, *args)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        return jsonify(ok=True)
+
+    @app.post("/api/blocks/<int:bid>/not-now")
+    @login_required
+    def block_not_now(bid):
+        return block_action(bid, service.not_now)
+
+    @app.post("/api/blocks/<int:bid>/skip")
+    @login_required
+    def block_skip(bid):
+        return block_action(bid, service.skip_routine)
+
+    @app.post("/api/blocks/<int:bid>/restore")
+    @login_required
+    def block_restore(bid):
+        return block_action(bid, service.restore_block)
+
+    @app.post("/api/blocks/<int:bid>/remove")
+    @login_required
+    def block_remove(bid):
+        return block_action(bid, service.remove_block)
+
     @app.post("/api/came-up")
     @login_required
     def came_up():
@@ -331,9 +421,12 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         remaining = sum(service.minutes_between(max(b.start, now), b.end) for b in blocks
                         if b.kind == "task" and b.status == "planned" and b.end > now)
         needs_checkin = [b.id for b in blocks if b.kind == "task" and b.status == "planned" and b.end <= now]
-        return jsonify(now=iso(now), blocks=[block_json(b) for b in blocks],
+        return jsonify(now=iso(now), blocks=blocks_json(g.db, blocks),
                        events=[{"id": e.id, "title": e.title, "start": iso(e.start), "end": iso(e.end)} for e in events],
                        remaining_task_minutes=remaining, needs_checkin=needs_checkin,
+                       due_soon=[task_tree_json(g.db, t, rules()) for t in g.db.scalars(
+                           select(Task).where(Task.status == "open", Task.parent_id.is_(None),
+                                              Task.due < now + timedelta(days=7)).order_by(Task.due).limit(12))],
                        warnings=plan.get("warnings", []), planned_at=plan.get("planned_at"))
 
     # ---- Routines, rules, settings -----------------------------------------------------------
@@ -391,6 +484,206 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             service.set_setting(g.db, k, data[k] if isinstance(data[k], str) else json.dumps(data[k]))
         g.db.commit()
         return jsonify(service.replan(g.db))
+
+    # ---- Courses (schedule pages to pull deadlines from) ----------------------------------------
+
+    @app.get("/api/courses")
+    @login_required
+    def list_courses():
+        out = []
+        for c in scrapers.get_courses(g.db):
+            d = course_json(c)
+            open_tasks = g.db.scalars(select(Task).where(Task.course_id == c.id, Task.status == "open",
+                                                         Task.parent_id.is_(None)).order_by(Task.due)).all()
+            cats = g.db.scalars(select(GradeCategory).where(GradeCategory.course_id == c.id)).all()
+            nxt = open_tasks[0] if open_tasks else None
+            d["stats"] = {"open": len(open_tasks), "next_title": nxt.title if nxt else None,
+                          "next_due": iso(nxt.due) if nxt else None,
+                          "grade": grades.summarize(cats, c.target_grade)["current"] if cats else None}
+            out.append(d)
+        return jsonify(courses=out, parsers=scrapers.PARSER_LABELS, colors=scrapers.COLORS,
+                       ai_ready=bool(os.getenv("GEMINI_API_KEY")))
+
+    def apply_course(c: Course, data: dict):
+        source_changed = bool({"url", "parser", "render_js", "class_days", "class_time"} & data.keys())
+        for k in COURSE_FIELDS & data.keys():
+            setattr(c, k, data[k])
+        if "links" in data:
+            links = [{"label": (l.get("label") or "").strip()[:80], "url": (l.get("url") or "").strip()}
+                     for l in data["links"] if (l.get("url") or "").strip()]
+            c.links = json.dumps(links)
+        c.url = (c.url or "").strip()
+        if c.parser != "none" and c.parser not in scrapers.PARSERS:
+            raise ValueError(f"unknown parser {c.parser}")
+        if not (c.name or "").strip():
+            raise ValueError("a course needs a name")
+        if c.url and not c.url.startswith(("http://", "https://")):
+            raise ValueError("the schedule page must be an http(s) URL")
+        if c.parser != "none" and not c.url:
+            c.parser = "none"
+        if "name" in data:
+            for t in g.db.scalars(select(Task).where(Task.course_id == c.id)):
+                t.course = c.name
+        if source_changed:
+            c.page_hash = None  # re-read the page next sync
+
+    @app.post("/api/courses")
+    @login_required
+    def create_course():
+        data = request.get_json(force=True)
+        base = scrapers._slug(data.get("name", "")) or "course"
+        code, n = base, 2
+        while g.db.scalar(select(Course).where(Course.code == code)):
+            code, n = f"{base}-{n}", n + 1
+        used = {x.color for x in g.db.scalars(select(Course))}
+        color = next((x for x in scrapers.COLORS if x not in used), "blue")
+        c = Course(code=code, name="", url="", parser="ai", review=True, color=color, links="[]", notes="", instructor="")
+        try:
+            apply_course(c, {"parser": "ai" if data.get("url") else "none", "review": True, **data})
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        g.db.add(c)
+        g.db.commit()
+        return jsonify(course_json(c)), 201
+
+    @app.patch("/api/courses/<int:cid>")
+    @login_required
+    def update_course(cid):
+        c = g.db.get(Course, cid) or abort(404)
+        try:
+            apply_course(c, request.get_json(force=True))
+        except ValueError as e:
+            g.db.rollback()
+            return jsonify(error=str(e)), 400
+        g.db.commit()
+        return jsonify(course_json(c))
+
+    @app.delete("/api/courses/<int:cid>")
+    @login_required
+    def delete_course(cid):
+        c = g.db.get(Course, cid) or abort(404)
+        for t in g.db.scalars(select(Task).where(Task.course_id == c.id)):
+            t.course_id, t.course = None, None  # tasks stay; they just lose the course label
+        g.db.delete(c)
+        g.db.commit()
+        return jsonify(ok=True)
+
+    def course_detail(c: Course) -> dict:
+        r = rules()
+        tasks = g.db.scalars(select(Task).where(Task.course_id == c.id, Task.parent_id.is_(None),
+                                                Task.status.in_(["open", "done", "suggested"])).order_by(Task.due)).all()
+        ids = [t.id for t in tasks] + [s.id for t in tasks for s in service.subtasks_of(g.db, t.id)]
+        now = service.local_now(g.db)
+        upcoming = g.db.scalars(select(Block).where(Block.task_id.in_(ids), Block.end > now - timedelta(days=1))
+                                .order_by(Block.start).limit(40)).all() if ids else []
+        cats = g.db.scalars(select(GradeCategory).where(GradeCategory.course_id == c.id)
+                            .order_by(GradeCategory.position, GradeCategory.id)).all()
+        return {"course": course_json(c), "tasks": [task_tree_json(g.db, t, r) for t in tasks],
+                "blocks": blocks_json(g.db, upcoming), "grades": grades.summarize(cats, c.target_grade)}
+
+    @app.get("/api/courses/<int:cid>")
+    @login_required
+    def get_course(cid):
+        c = g.db.get(Course, cid) or abort(404)
+        return jsonify(course_detail(c))
+
+    @app.post("/api/courses/<int:cid>/grade-categories")
+    @login_required
+    def add_category(cid):
+        c = g.db.get(Course, cid) or abort(404)
+        d = request.get_json(force=True)
+        n = len(g.db.scalars(select(GradeCategory).where(GradeCategory.course_id == cid)).all())
+        g.db.add(GradeCategory(course_id=cid, name=d.get("name") or "Category", weight=float(d.get("weight") or 0),
+                               drop_lowest=int(d.get("drop_lowest") or 0), position=n))
+        g.db.commit()
+        return jsonify(course_detail(c)["grades"]), 201
+
+    @app.patch("/api/grade-categories/<int:gid>")
+    @login_required
+    def update_category(gid):
+        cat = g.db.get(GradeCategory, gid) or abort(404)
+        d = request.get_json(force=True)
+        for k, conv in (("name", str), ("weight", float), ("drop_lowest", int), ("position", int)):
+            if k in d:
+                setattr(cat, k, conv(d[k] or 0) if k != "name" else d[k])
+        g.db.commit()
+        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"])
+
+    @app.delete("/api/grade-categories/<int:gid>")
+    @login_required
+    def delete_category(gid):
+        cat = g.db.get(GradeCategory, gid) or abort(404)
+        cid = cat.course_id
+        g.db.delete(cat)
+        g.db.commit()
+        return jsonify(course_detail(g.db.get(Course, cid))["grades"])
+
+    def num_or_none(v):
+        return None if v in (None, "") else float(v)
+
+    @app.post("/api/grade-categories/<int:gid>/items")
+    @login_required
+    def add_grade_item(gid):
+        cat = g.db.get(GradeCategory, gid) or abort(404)
+        d = request.get_json(force=True)
+        g.db.add(GradeItem(category_id=gid, name=d.get("name") or "Item", score=num_or_none(d.get("score")),
+                           out_of=float(d.get("out_of") or 100)))
+        g.db.commit()
+        g.db.expire(cat)
+        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"]), 201
+
+    @app.patch("/api/grade-items/<int:iid>")
+    @login_required
+    def update_grade_item(iid):
+        it = g.db.get(GradeItem, iid) or abort(404)
+        d = request.get_json(force=True)
+        if "name" in d:
+            it.name = d["name"]
+        if "score" in d:
+            it.score = num_or_none(d["score"])
+        if "out_of" in d:
+            it.out_of = float(d["out_of"] or 100)
+        g.db.commit()
+        cat = g.db.get(GradeCategory, it.category_id)
+        g.db.expire(cat)
+        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"])
+
+    @app.delete("/api/grade-items/<int:iid>")
+    @login_required
+    def delete_grade_item(iid):
+        it = g.db.get(GradeItem, iid) or abort(404)
+        cat = g.db.get(GradeCategory, it.category_id)
+        g.db.delete(it)
+        g.db.commit()
+        g.db.expire(cat)
+        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"])
+
+    @app.post("/api/courses/<int:cid>/test")
+    @login_required
+    def test_course(cid):
+        """Fetch and parse the page without saving anything, so you can see what it would add."""
+        c = g.db.get(Course, cid) or abort(404)
+        if c.parser == "none" or not c.url:
+            return jsonify(error="Add a schedule page URL first"), 400
+        now = service.local_now(g.db)
+        try:
+            items, _ = scrapers.extract(c, now.date())
+        except Exception as e:
+            return jsonify(error=f"{type(e).__name__}: {e}"[:500]), 502
+        known = {t.external_id: t.status for t in g.db.scalars(
+            select(Task).where(Task.external_id.in_([i.external_id for i in items])))}
+        return jsonify(items=[{"title": i.title, "due": iso(i.due), "kind": i.kind, "past": i.due < now,
+                               "status": known.get(i.external_id, "new")} for i in items])
+
+    @app.post("/api/courses/<int:cid>/sync")
+    @login_required
+    def sync_one_course(cid):
+        c = g.db.get(Course, cid) or abort(404)
+        if c.parser == "none" or not c.url:
+            return jsonify(error="Add a schedule page URL first"), 400
+        result = scrapers.sync_course(g.db, c, service.local_now(g.db), force=True)
+        service.replan(g.db)
+        return jsonify(course=course_json(c), result=result)
 
     # ---- Frontend ----------------------------------------------------------------------------
 

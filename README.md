@@ -64,7 +64,8 @@ With `DEV_LOGIN=1` you can click **Dev login** without Google. Tests: `cd backen
 3. **Render:** https://render.com → New → Blueprint → pick the repo (uses `render.yaml`). Fill in
    `DATABASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS`.
 4. Add the Render URL's `/auth/callback` to the Google OAuth client (step 4 above).
-5. Seed your routine once: Render → Shell → `python seed.py`.
+5. Seed your routine once from your laptop, pointed at Neon: set `DATABASE_URL` in `backend/.env` and run `python seed.py` (Render's free plan has no Shell).
+6. Optional, for course pages the built-in readers don't know: create a free key at https://aistudio.google.com/apikey and add it in Render as `GEMINI_API_KEY`. `GEMINI_MODEL` overrides the model (default `gemini-2.5-flash`).
 6. **Scheduled sync:** in the GitHub repo, Settings → Secrets → Actions, add `PLANNER_URL` and `CRON_SECRET`
    (copy it from Render's environment). `.github/workflows/sync.yml` then syncs 3× a day.
 

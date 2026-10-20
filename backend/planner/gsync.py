@@ -325,8 +325,7 @@ def full_sync(db: Session, now: datetime | None = None, services=None, scrape=Tr
     if tasks_api:
         report["google_tasks"] = import_google_tasks(db, tasks_api, now)
     if scrape:
-        courses = scrapers.load_courses(service.get_settings(db).get("courses"))
-        report["courses"] = scrapers.sync_courses(db, courses, now)
+        report["courses"] = scrapers.sync_courses(db, now)
     report["plan"] = service.replan(db, now)
     if cal:
         report["pushed"] = push_plan(db, cal, now)

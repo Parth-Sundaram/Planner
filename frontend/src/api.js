@@ -7,7 +7,10 @@ async function request(method, url, body) {
     credentials: "same-origin",
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
+  if (!res.ok) {
+    const fallback = res.status >= 502 ? "The server didn't respond in time. Try again in a minute." : `Request failed (${res.status})`;
+    throw Object.assign(new Error(data.error || fallback), { status: res.status });
+  }
   return data;
 }
 
@@ -36,3 +39,30 @@ export function fmtMinutes(m) {
 export function minutesBetween(a, b) {
   return Math.round((new Date(b) - new Date(a)) / 60000);
 }
+
+export function fmtDue(iso, now = new Date()) {
+  const d = new Date(iso);
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((day - today) / 86400000);
+  const t = fmtTime(iso);
+  if (diff === 0) return `Today ${t}`;
+  if (diff === 1) return `Tomorrow ${t}`;
+  if (diff === -1) return `Yesterday ${t}`;
+  if (diff > 1 && diff < 7) return `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
+  return `${fmtDay(iso)} ${t}`;
+}
+export function dayBucket(iso, now = new Date()) {
+  const d = new Date(iso);
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((day - today) / 86400000);
+  if (d < now) return "Overdue";
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff < 7) return "This week";
+  if (diff < 14) return "Next week";
+  return "Later";
+}
+export const BUCKETS = ["Overdue", "Today", "Tomorrow", "This week", "Next week", "Later"];
+export function localInput(iso) { return iso ? iso.slice(0, 16) : ""; }
