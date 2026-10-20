@@ -1,0 +1,15 @@
+# Free scheduled sync: re-scrapes course sites, pulls Google, replans, pushes the plan.
+# Add repo secrets PLANNER_URL (e.g. https://planner-xxxx.onrender.com) and CRON_SECRET (same value as on Render).
+name: Planner sync
+on:
+  schedule:
+    - cron: "0 11,17,23 * * *"   # 7 AM, 1 PM, 7 PM Eastern (UTC times; shift by an hour in winter)
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger sync
+        run: |
+          curl -fsS -X POST "${{ secrets.PLANNER_URL }}/api/sync" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" --max-time 120

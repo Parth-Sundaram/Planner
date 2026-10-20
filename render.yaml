@@ -1,0 +1,20 @@
+# Render blueprint: New + > Blueprint, point it at this repo.
+services:
+  - type: web
+    name: planner
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/me
+    envVars:
+      - key: DATABASE_URL          # paste your Neon (or other) Postgres URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ALLOWED_EMAILS        # your Google account email
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
