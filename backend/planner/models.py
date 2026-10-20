@@ -128,7 +128,12 @@ def make_session_factory(url: str | None = None):
         url = url.replace("postgres://", "postgresql+psycopg://", 1)
     elif url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+psycopg://", 1)
-    engine = create_engine(url, future=True)
+    
+    if url.startswith("sqlite"):
+            engine = create_engine(url, future=True)
+    else:
+        engine = create_engine(url, future=True, pool_pre_ping=True, pool_recycle=240)
+        
     if engine.dialect.name == "sqlite":
         @event.listens_for(engine, "connect")
         def _fk_on(conn, _):  # SQLite ignores ON DELETE CASCADE unless this is on
