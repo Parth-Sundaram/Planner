@@ -82,3 +82,15 @@ Every change (new task, check-in, drag, "something came up", sync) triggers a re
 
 Course scrapers were written against the course pages' table layout; if a page changes format, Sync shows
 `failed` for that course and everything else keeps working.
+
+
+## AI features (all optional, free tier)
+Set `GEMINI_API_KEY` in Render (free key: https://aistudio.google.com/apikey). It powers:
+- reading course pages that have no built-in reader; after the first read it saves a *recipe* and stops calling the AI until the page is redesigned
+- the assistant (Ctrl/⌘ K). Model: `GEMINI_ASSISTANT_MODEL`, default `gemini-2.5-flash-lite` for speed
+- meal photo estimates on the Fitness page
+
+## Chrome extension
+`extension/` is an unpacked Chrome extension. In Chrome: chrome://extensions → Developer mode → Load unpacked → pick the folder.
+Then open its options, paste your planner URL and the key from Settings → Phone & extension.
+Right-click any page, selection or link → "Add to Planner" (or Alt+Shift+P). Dates in plain words ("by Friday", "every Sunday") are understood.

@@ -156,3 +156,17 @@ def test_routine_that_already_happened_today_is_not_replaced(db):
     service.replan(db, later)                    # breakfast already over; must not reappear at 8:45
     today = [b for b in db.scalars(select(Block).where(Block.kind == "routine")) if b.start.date() == NOW.date()]
     assert len(today) == 1 and today[0].start == NOW
+
+
+def test_block_pinned_after_deadline_doesnt_count(db):
+    t = Task(title="Quiz prep", due=NOW + timedelta(days=1), est_minutes=60, max_block=60)
+    db.add(t); db.commit()
+    service.replan(db, NOW)
+    b = blocks_for(db, t.id)[0]
+    late = NOW + timedelta(days=2)
+    service.move_block(db, b.id, late, late + timedelta(minutes=60))
+    bs = blocks_for(db, t.id)
+    before = [x for x in bs if x.end <= t.due]
+    assert sum(service.minutes_between(x.start, x.end) for x in before) == 60
+    plan = service.replan(db, NOW)
+    assert any("after the deadline" in w["message"] for w in plan["warnings"])

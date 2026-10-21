@@ -44,6 +44,8 @@ class Task(Base):
     # many days before the deadline the prep is spread over.
     confidence: Mapped[int | None] = mapped_column(Integer)
     max_per_day: Mapped[int | None] = mapped_column(Integer)  # cap on this task's minutes per day
+    repeat: Mapped[str | None] = mapped_column(String(30))     # daily | weekdays | weekly:N | biweekly | monthly
+    series_id: Mapped[int | None] = mapped_column(Integer)      # first task of a repeating series
 
     @property
     def tag_list(self) -> list[str]:
@@ -104,10 +106,13 @@ class ExternalEvent(Base):
 
 
 class Course(Base):
-    """A course schedule page to pull deadlines from. `parser` is a built-in reader
-    (csse304, csse313) or "ai" for Gemini extraction on any page."""
+    """A course or another area of life (career, fitness, finance, personal). Every kind has
+    tasks, links and notes; courses add a schedule page and grades, other kinds add their
+    own modules. `parser` is a built-in reader (csse304, csse313), "ai" (Gemini) or "none"."""
     __tablename__ = "courses"
     id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), default="course")   # course | career | fitness | finance | personal
+    keywords: Mapped[str] = mapped_column(Text, default="")          # comma separated; quick-add files matching tasks here
     code: Mapped[str] = mapped_column(String(50), unique=True)
     name: Mapped[str] = mapped_column(String(100))
     url: Mapped[str] = mapped_column(String(500), default="")
@@ -120,11 +125,16 @@ class Course(Base):
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_result: Mapped[str] = mapped_column(Text, default="")    # JSON report of the last sync
     page_hash: Mapped[str | None] = mapped_column(String(64))     # skip AI calls when the page hasn't changed
+    recipe: Mapped[str | None] = mapped_column(Text)              # JSON reader the AI wrote for this page; see recipes.py
     color: Mapped[str] = mapped_column(String(20), default="blue")
     instructor: Mapped[str] = mapped_column(String(100), default="")
     notes: Mapped[str] = mapped_column(Text, default="")
     links: Mapped[str] = mapped_column(Text, default="[]")         # JSON [{"label", "url"}]: repos, Moodle...
     target_grade: Mapped[float | None] = mapped_column(Float)
+    grade_scale: Mapped[str] = mapped_column(Text, default="[]")     # JSON [{"letter": "A", "min": 90}, ...]
+    grade_policies: Mapped[str] = mapped_column(Text, default="")     # notes pulled from the syllabus (late work, rounding...)
+    attend_allowed: Mapped[int] = mapped_column(Integer, default=0)   # absences that don't cost anything
+    attend_expected: Mapped[int | None] = mapped_column(Integer)      # class meetings in the term, if known
 
 
 class GradeCategory(Base):
@@ -136,8 +146,20 @@ class GradeCategory(Base):
     weight: Mapped[float] = mapped_column(Float, default=0)
     drop_lowest: Mapped[int] = mapped_column(Integer, default=0)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    # Subcategories: weight is a share of the parent (Homework 30% -> Labs 2/3, Problem sets 1/3).
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("grade_categories.id", ondelete="CASCADE"))
+    is_attendance: Mapped[bool] = mapped_column(Boolean, default=False)  # scored from the attendance counter
     items: Mapped[list["GradeItem"]] = relationship(order_by="GradeItem.id", cascade="all, delete-orphan",
                                                     passive_deletes=True)
+
+
+class AttendanceLog(Base):
+    """One class meeting: present, absent or excused."""
+    __tablename__ = "attendance_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"))
+    day: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(10))   # present | absent | excused
 
 
 class GradeItem(Base):
@@ -147,6 +169,38 @@ class GradeItem(Base):
     name: Mapped[str] = mapped_column(String(200))
     score: Mapped[float | None] = mapped_column(Float)   # None = not graded yet
     out_of: Mapped[float] = mapped_column(Float, default=100)
+
+
+class AreaEntry(Base):
+    """A record inside an area. `type` decides what `data` (JSON) holds:
+    job (company, role, stage, link, next_step, next_date), meal (name, calories, protein,
+    carbs, fat), workout (kind, minutes, notes), metric (sleep_minutes, steps, weight, resting_hr),
+    bill (name, amount, frequency, autopay), expense (amount, category, note), budget (category, limit)."""
+    __tablename__ = "area_entries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    area_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"))
+    type: Mapped[str] = mapped_column(String(20))
+    date: Mapped[datetime | None] = mapped_column(DateTime)
+    data: Mapped[str] = mapped_column(Text, default="{}")
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class AssistantNote(Base):
+    """Things the assistant has learned about how you work ("PLC takes longer than I estimate")."""
+    __tablename__ = "assistant_notes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class AssistantMessage(Base):
+    __tablename__ = "assistant_messages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    role: Mapped[str] = mapped_column(String(10))   # user | model
+    text: Mapped[str] = mapped_column(Text)
+    actions: Mapped[str] = mapped_column(Text, default="[]")  # proposed actions (JSON), for the model turn
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class Setting(Base):

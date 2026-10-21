@@ -46,6 +46,16 @@ export default function Settings({ ctx }) {
       </div>
 
       <div className="set-card">
+        <h3>Nutrition targets</h3>
+        <div className="row">
+          <label className="field inline">Calories / day<input type="number" defaultValue={settings.calorie_target || 2500} onBlur={put("calorie_target")} style={{ width: 100 }} /></label>
+          <label className="field inline">Protein / day (g)<input type="number" defaultValue={settings.protein_target || 150} onBlur={put("protein_target")} style={{ width: 90 }} /></label>
+        </div>
+      </div>
+
+      <PhoneAndExtension ctx={ctx} />
+
+      <div className="set-card">
         <h3>Weekly routine</h3>
         <p className="muted small" style={{ margin: 0 }}>Fixed things (classes) use a window equal to their length. Meals, gym and chores get a window and float inside it.</p>
         <div>
@@ -109,6 +119,40 @@ function NewRule({ act }) {
       <input type="time" value={f.time} onChange={(e) => setF({ ...f, time: e.target.value })} />
       <input value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder="why (optional)" className="grow" />
       <button className="btn sm" onClick={() => f.tag && act(() => api.post("/api/rules", f), "Rule added").then(() => setF({ ...f, tag: "", description: "" }))}>Add rule</button>
+    </div>
+  );
+}
+
+function PhoneAndExtension({ ctx }) {
+  const [tok, setTok] = useState(null);
+  const [shown, setShown] = useState(false);
+  useEffect(() => { api.get("/api/token").then((d) => setTok(d.token)).catch(() => {}); }, []);
+  const origin = window.location.origin;
+  async function rotate() {
+    if (tok && !confirm("Make a new key? Anything using the old one (phone shortcut, extension) stops working until you update it.")) return;
+    const d = await api.post("/api/token"); setTok(d.token); setShown(true); ctx.notify("New key created");
+  }
+  return (
+    <div className="set-card">
+      <h3>Phone & extension</h3>
+      <p className="muted small" style={{ margin: 0 }}>A private key lets your phone send sleep and steps, and lets the browser extension add tasks, without your Google login. Treat it like a password.</p>
+      <div className="row">
+        <code style={{ padding: "5px 8px" }}>{tok ? (shown ? tok : "••••••••••••" + tok.slice(-4)) : "no key yet"}</code>
+        {tok && <button className="btn sm" onClick={() => setShown(!shown)}>{shown ? "Hide" : "Show"}</button>}
+        {tok && <button className="btn sm" onClick={() => { navigator.clipboard?.writeText(tok); ctx.notify("Copied"); }}>Copy</button>}
+        <button className="btn sm" onClick={rotate}>{tok ? "Make a new key" : "Create key"}</button>
+      </div>
+      <details className="adv">
+        <summary>Send sleep and steps from your phone</summary>
+        <div className="small stack" style={{ gap: 6 }}>
+          <div><b>iPhone (Shortcuts app):</b> New personal automation → Time of Day 9:00 AM daily → actions: <i>Find Health Samples</i> (Sleep, last night) and <i>Find Health Samples</i> (Steps, yesterday) → <i>Get Contents of URL</i>:</div>
+          <code style={{ whiteSpace: "pre-wrap", display: "block", padding: 8 }}>{`POST ${origin}/api/health/ingest
+Header  Authorization: Bearer <your key>
+JSON    {"date": "<yesterday>", "sleep_minutes": <sleep total>, "steps": <steps total>}`}</code>
+          <div><b>Android:</b> GloryFit writes to Health Connect. Any "Health Connect to webhook" exporter can POST the same JSON on a schedule.</div>
+          <div className="faint">Either way the numbers show up on the Fitness page.</div>
+        </div>
+      </details>
     </div>
   );
 }

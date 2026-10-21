@@ -122,9 +122,20 @@ def replan(db: Session, now: datetime | None = None) -> dict:
         if t.parent_id is not None:
             children.setdefault(t.parent_id, []).append(t)
 
+    late_pins: list[tuple[Task, Block]] = []
+
     def remaining_of(t: Task) -> tuple[int, int]:
-        placed = sum(minutes_between(max(b.start, now), b.end) for b in kept
-                     if b.task_id == t.id and b.status == "planned")
+        # Only time before the deadline counts. A block pinned after the due date doesn't
+        # get the work done in time, so that work is still planned before the deadline.
+        placed = 0
+        for b in kept:
+            if b.task_id != t.id or b.status != "planned":
+                continue
+            end = min(b.end, t.due)
+            if end > max(b.start, now):
+                placed += minutes_between(max(b.start, now), end)
+            if b.end > t.due:
+                late_pins.append((t, b))
         return max(0, t.est_minutes - t.done_minutes - placed), placed
 
     specs = []
@@ -160,6 +171,11 @@ def replan(db: Session, now: datetime | None = None) -> dict:
     for b in result.blocks:
         db.add(Block(title=b.title, start=b.start, end=b.end, kind=b.kind,
                      task_id=b.task_id, routine_id=b.routine_id))
+
+    for t, b in late_pins:
+        result.warnings.append(S.Warning(
+            "warn", f"{t.title}: the block you placed {S.fmt_time(b.start)} is after the deadline "
+                    f"({S.fmt_dt(t.due)}), so that time was planned again before it", t.id))
 
     for t in db.scalars(select(Task).where(Task.status == "open", Task.needs_estimate.is_(True))):
         result.warnings.append(S.Warning("info", f"{t.title} is using a default {t.est_minutes} min estimate — set a real one", t.id))
@@ -198,8 +214,29 @@ def check_in(db: Session, block_id: int, status: str, minutes: int | None = None
         t.done_minutes = max(0, t.done_minutes - prev + worked)
         if status == "done" and t.done_minutes >= t.est_minutes:
             t.status = "done"
+            spawn_next(db, t)
             _close_parent_if_finished(db, t)
     replan(db)
+
+
+def spawn_next(db: Session, t: Task) -> Task | None:
+    """When a repeating task is finished, create the next one (once)."""
+    from .quickadd import next_due
+    if not t.repeat or t.parent_id:
+        return None
+    series = t.series_id or t.id
+    due = next_due(t.due, t.repeat)
+    ext = f"repeat:{series}:{due.date().isoformat()}"
+    if db.scalar(select(Task).where(Task.external_id == ext)):
+        return None
+    nxt = Task(title=t.title, course=t.course, course_id=t.course_id, due=due, est_minutes=t.est_minutes,
+               priority=t.priority, splittable=t.splittable, min_block=t.min_block, max_block=t.max_block,
+               tags=t.tags, notes=t.notes, repeat=t.repeat, series_id=series, external_id=ext,
+               source=t.source if t.source == "manual" else "manual", needs_estimate=False)
+    if t.series_id is None:
+        t.series_id = series
+    db.add(nxt)
+    return nxt
 
 
 def _close_parent_if_finished(db: Session, t: Task) -> None:
@@ -218,6 +255,7 @@ def finish_task(db: Session, task_id: int) -> None:
     ids = [t.id] + [c.id for c in db.scalars(select(Task).where(Task.parent_id == t.id))]
     for tid in ids:
         db.get(Task, tid).status = "done"
+    spawn_next(db, t)
     db.execute(delete(Block).where(Block.task_id.in_(ids), Block.status == "planned",
                                    Block.start >= local_now(db)))
     _close_parent_if_finished(db, t)
@@ -239,6 +277,15 @@ def something_came_up(db: Session, minutes: int, title: str = "Something came up
     # Anything planned that was in progress gets cut at "now"; the rest is replanned.
     for b in db.scalars(select(Block).where(Block.start < now, Block.end > now, Block.status == "planned")):
         b.end = now
+    db.add(blk)
+    db.flush()
+    replan(db)
+    return blk
+
+
+def block_time(db: Session, start: datetime, minutes: int, title: str = "Busy") -> Block:
+    """Block off time at a given moment (not just now) and replan around it."""
+    blk = Block(title=title, start=start, end=start + timedelta(minutes=minutes), kind="busy", locked=True)
     db.add(blk)
     db.flush()
     replan(db)
@@ -341,3 +388,29 @@ def parse_meta(text: str) -> tuple[str, dict]:
         meta["splittable"] = False
         text = NOSPLIT.sub(" ", text)
     return " ".join(text.split()), meta
+
+
+# ---- Smart quick-add -------------------------------------------------------------------
+
+def smart_fill(db: Session, title: str, now: datetime) -> dict:
+    """Fill in due date, repeat, estimate and course/area from a short line. Returns the
+    cleaned title plus whatever it could work out, and how ("why") for the UI."""
+    from . import quickadd as Q
+    due, repeat, clean = Q.parse_when(title, now)
+    out: dict = {"title": clean or title, "why": {}}
+    if due:
+        out["due"], out["why"]["due"] = due, "from your text"
+    if repeat:
+        out["repeat"] = repeat
+    history = [(t.title, t.est_minutes) for t in db.scalars(
+        select(Task).where(Task.status == "done", Task.parent_id.is_(None)).order_by(Task.id.desc()).limit(300))]
+    est = Q.estimate_from_history(out["title"], history)
+    if est:
+        out["est_minutes"], out["why"]["est"] = est, "like similar tasks you've finished"
+    elif (est := Q.default_minutes(out["title"])):
+        out["est_minutes"], out["why"]["est"] = est, "typical for this kind of task"
+    from .scrapers import get_courses
+    area = Q.guess_area(out["title"], get_courses(db))
+    if area:
+        out["course_id"], out["why"]["area"] = area.id, area.name
+    return out

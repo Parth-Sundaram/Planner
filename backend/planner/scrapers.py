@@ -293,9 +293,14 @@ def parse_ai(html: str, today: date, class_time: time = time(10), class_days: st
         "Skip lecture topics with nothing due, holidays, and office hours. Don't invent items.\n\n"
         f"PAGE:\n{text}"
     )
+    return normalize_raw(ask_gemini(prompt), code=code, course=course, class_time=class_time)
+
+
+def normalize_raw(raws: list[dict], code: str, course: str, class_time: time) -> list[Item]:
+    """Shared clean-up for AI answers and recipe rows: dates, default times, study tasks, ids."""
     items: list[Item] = []
     seen: dict[str, int] = {}
-    for raw in ask_gemini(prompt):
+    for raw in raws:
         try:
             d = date.fromisoformat(str(raw["due_date"])[:10])
         except (KeyError, ValueError):
@@ -322,6 +327,42 @@ def parse_ai(html: str, today: date, class_time: time = time(10), class_days: st
         items.append(Item(ext, title, datetime.combine(d, when), course, est_kind,
                           120 if kind == "quiz" else 60 if kind == "presentation" else _estimate(est_kind, title)))
     return items
+
+
+def _guess_kind(title: str) -> str:
+    t = title.lower()
+    for kind, rx in (("exam", r"\bexam|midterm|final\b"), ("quiz", r"\bquiz"), ("presentation", r"present"),
+                     ("project", r"project|milestone"), ("reading", r"\bread")):
+        if re.search(rx, t):
+            return kind
+    return "assignment"
+
+
+def recipe_items(course: Course, html: str, today: date) -> list[Item]:
+    from . import recipes
+    rows = recipes.run(json.loads(course.recipe), html, today)
+    h, m = (int(x) for x in (course.class_time or "10:00").split(":"))
+    raws = [{"title": r["title"], "kind": _guess_kind(r["title"]), "due_date": r["date"].isoformat(),
+             "due_time": r["time"].strftime("%H:%M") if r["time"] else None} for r in rows]
+    return normalize_raw(raws, course.code, course.name, time(h, m))
+
+
+def learn_recipe(course: Course, html: str, items: list[Item], today: date) -> str:
+    """After the AI reads a page, ask it for a recipe and keep it only if it reproduces the answer."""
+    from . import recipes
+    if len(items) < 2:
+        return "too few items to learn from"
+    examples = [{"title": i.title.removeprefix("Study: "), "date": i.due.date()} for i in items]
+    try:
+        recipe = recipes.write_recipe(html, examples)
+    except Exception as e:
+        return f"couldn't write one ({type(e).__name__})"
+    rows = recipes.run(recipe, html, today)
+    score = recipes.agreement(rows, examples)
+    if score >= 0.8:
+        course.recipe = json.dumps(recipe)
+        return f"saved (matches {round(100 * score)}%)"
+    return f"not reliable enough ({round(100 * score)}% match), so the AI keeps reading this page"
 
 
 PARSERS = {"csse304": parse_csse304, "csse313": parse_csse313, "ai": parse_ai}
@@ -373,6 +414,15 @@ def get_courses(db: Session, enabled_only: bool = False) -> list[Course]:
                               color=c.get("color", "blue")))
         db.add(Setting(key="courses_seeded", value="1"))
         db.commit()
+    if db.get(Setting, "areas_seeded") is None:
+        # Areas beyond courses, so quick-add has somewhere to file "timesheet", "rent", "gym"...
+        have = {c.name.lower() for c in db.scalars(select(Course))}
+        for name, kind, color in (("Career", "career", "orange"), ("Fitness", "fitness", "green"), ("Finance", "finance", "yellow")):
+            if name.lower() not in have:
+                db.add(Course(code=kind, name=name, kind=kind, url="", parser="none", color=color,
+                              review=True, links="[]", notes="", instructor="", keywords=""))
+        db.add(Setting(key="areas_seeded", value="1"))
+        db.commit()
     link_tasks_to_courses(db)
     q = select(Course).order_by(Course.id)
     if enabled_only:
@@ -403,14 +453,20 @@ def link_tasks_to_courses(db: Session) -> None:
     db.commit()
 
 
-def extract(course: Course, today: date, html: str | None = None) -> tuple[list[Item], str]:
-    """Fetch and parse one course page. Returns the items and a hash of the page text."""
+def extract(course: Course, today: date, html: str | None = None, use_recipe: bool = True) -> tuple[list[Item], str, str]:
+    """Fetch and parse one course page. Returns the items, a hash of the page text, and how it was read."""
     if html is None:
         html = fetch_html(course.url, course.render_js,
                           wait_for="table tr td" if course.parser == "csse313" else None)
     h, m = (int(x) for x in (course.class_time or "10:00").split(":"))
     text = page_text(html)
     digest = hashlib.sha256(text.encode()).hexdigest()
+    if course.parser == "ai" and use_recipe and course.recipe:
+        items = recipe_items(course, html, today)
+        prev = json.loads(course.last_result or "{}").get("found") or 0
+        if items and len(items) >= 0.5 * prev:
+            return items, digest, "recipe"
+        course.recipe = None  # the page changed shape: read it with the AI and learn again
     kwargs = {"class_time": time(h, m)}
     if course.parser in ("csse313", "ai"):
         kwargs["class_days"] = course.class_days or "MTRF"
@@ -419,27 +475,29 @@ def extract(course: Course, today: date, html: str | None = None) -> tuple[list[
     items = PARSERS[course.parser](html, today, **kwargs)
     if course.parser != "ai":  # built-in parsers name their own course; use the user's name for it
         items = [Item(i.external_id, i.title, i.due, course.name, i.kind, i.est_minutes) for i in items]
-    return items, digest
+        return items, digest, "built-in"
+    return items, digest, "ai"
 
 
 def sync_course(db: Session, course: Course, now: datetime, force: bool = False) -> dict:
     try:
-        if course.parser == "ai" and not force:
-            # Only spend a Gemini call when the page actually changed.
-            html = fetch_html(course.url, course.render_js, wait_for=None)
-            digest = hashlib.sha256(page_text(html).encode()).hexdigest()
-            prev = json.loads(course.last_result or "{}")
-            if digest == course.page_hash and "error" not in prev:
-                result = {"found": prev.get("found", 0), "created": 0, "suggested": 0, "updated": 0, "unchanged": True}
-                course.last_sync_at = now
-                course.last_result = json.dumps(result)
-                db.commit()
-                return result
-            items, digest = extract(course, now.date(), html)
-        else:
-            items, digest = extract(course, now.date())
+        html = fetch_html(course.url, course.render_js,
+                          wait_for="table tr td" if course.parser == "csse313" else None)
+        digest = hashlib.sha256(page_text(html).encode()).hexdigest()
+        prev = json.loads(course.last_result or "{}")
+        if course.parser == "ai" and not force and digest == course.page_hash and "error" not in prev:
+            # Nothing changed on the page: no AI call, nothing to add.
+            result = {"found": prev.get("found", 0), "created": 0, "suggested": 0, "updated": 0, "unchanged": True,
+                      "read_with": prev.get("read_with")}
+            course.last_sync_at = now
+            course.last_result = json.dumps(result)
+            db.commit()
+            return result
+        items, digest, how = extract(course, now.date(), html)
         result = {"found": len(items), **sync_items(db, items, now, review=course.review,
-                                                    tag=_slug(course.name), course_id=course.id)}
+                                                    tag=_slug(course.name), course_id=course.id), "read_with": how}
+        if how == "ai":
+            result["recipe"] = learn_recipe(course, html, items, now.date())
         course.page_hash = digest
     except Exception as e:  # one broken site shouldn't stop the others
         db.rollback()

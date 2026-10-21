@@ -8,6 +8,9 @@ import { CourseList, CoursePage } from "./Courses.jsx";
 import Settings from "./Settings.jsx";
 import TaskPanel from "./TaskPanel.jsx";
 import BlockPanel from "./BlockPanel.jsx";
+import Assistant from "./Assistant.jsx";
+
+const AREA_ICON = { career: "briefcase", fitness: "heart", finance: "wallet", personal: "today" };
 
 function parseRoute() {
   const h = window.location.hash.replace(/^#\/?/, "");
@@ -106,9 +109,15 @@ export default function App() {
           <a href="#/courses" style={{ textDecoration: "none" }}>Courses</a>
           <a className="icon-btn" href="#/courses" title="All courses"><Icon name="book" size={14} /></a>
         </div>
-        {courses.map((c) => (
+        {courses.filter((c) => c.kind === "course").map((c) => (
           <a key={c.id} className={`nav-item c-${c.color} ${route.page === "courses" && route.id === c.id ? "active" : ""}`} href={`#/courses/${c.id}`}>
             <span className="dot" /><span className="ellipsis">{c.name}</span>
+          </a>
+        ))}
+        <div className="nav-label"><span>Areas</span></div>
+        {courses.filter((c) => c.kind !== "course").map((c) => (
+          <a key={c.id} className={`nav-item c-${c.color} ${route.page === "courses" && route.id === c.id ? "active" : ""}`} href={`#/courses/${c.id}`}>
+            <Icon name={AREA_ICON[c.kind] || "book"} size={14} /><span className="ellipsis">{c.name}</span>
           </a>
         ))}
         <div className="sidebar-foot">
@@ -129,6 +138,7 @@ export default function App() {
       </main>
       {panel?.type === "task" && <TaskPanel key={panel.id} id={panel.id} ctx={ctx} onClose={() => setPanel(null)} />}
       {panel?.type === "block" && <BlockPanel key={panel.block.id + panel.block.kind} block={panel.block} ctx={ctx} onClose={() => setPanel(null)} />}
+      <Assistant ctx={ctx} />
       {toast && <div className={`toast ${toast.kind}`} role="status">{toast.msg}</div>}
     </div>
   );

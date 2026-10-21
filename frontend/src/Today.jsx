@@ -98,6 +98,24 @@ export default function Today({ ctx }) {
               </div>
             </div>
           )}
+          {data.attendance?.length > 0 && (
+            <div>
+              <div className="section-title">Were you in class?</div>
+              <div className="stack" style={{ gap: 6 }}>
+                {data.attendance.map((a) => (
+                  <div key={a.course_id} className="row between">
+                    <span>{a.name}</span>
+                    <span className="seg">
+                      {[["present", "Yes"], ["absent", "No"], ["excused", "Excused"]].map(([st, l]) => (
+                        <button key={st} className={a.status === st ? "on" : ""}
+                                onClick={() => act(() => api.post(`/api/courses/${a.course_id}/attendance`, { status: st, once: true }), `${a.name}: ${l === "Yes" ? "present" : st}`)}>{l}</button>
+                      ))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {needConfidence.length > 0 && (
             <div>
               <div className="section-title">How ready do you feel?</div>

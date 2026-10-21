@@ -62,7 +62,7 @@ export default function TaskPanel({ id, ctx, onClose }) {
         <div className="k">Due</div>
         <div className="v"><Field type="datetime-local" value={localInput(t.due)} onSave={(v) => v && save({ due: v })} /></div>
         {t.effective_due !== t.due && <><div className="k">Target</div><div className="v muted small">{fmtDay(t.effective_due)} {fmtTime(t.effective_due)} (deadline rule)</div></>}
-        <div className="k">Course</div>
+        <div className="k">Course / area</div>
         <div className="v">
           <select value={t.course_id || ""} onChange={(e) => save({ course_id: e.target.value ? Number(e.target.value) : null })}>
             <option value="">None</option>
@@ -83,6 +83,16 @@ export default function TaskPanel({ id, ctx, onClose }) {
             <option value={1}>High</option><option value={2}>Normal</option><option value={3}>Low</option>
           </select>
         </div>
+        {!t.parent_id && <>
+          <div className="k">Repeats</div>
+          <div className="v">
+            <select value={t.repeat ? (t.repeat.startsWith("weekly") ? "weekly" : t.repeat) : ""} onChange={(e) => save({ repeat: e.target.value || null })}>
+              <option value="">Doesn't repeat</option><option value="daily">Every day</option><option value="weekdays">Every weekday</option>
+              <option value="weekly">Every week</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Every month</option>
+            </select>
+            {t.repeat && <span className="faint small">next one appears when you finish this</span>}
+          </div>
+        </>}
         <div className="k">Tags</div>
         <div className="v"><Field value={t.tags.join(", ")} placeholder="Add tags" onSave={(v) => save({ tags: v })} /></div>
         {t.source !== "manual" && <><div className="k">From</div><div className="v muted small">{t.source.replace("scrape:", "course site: ").replace("google_tasks", "Google Tasks")}</div></>}

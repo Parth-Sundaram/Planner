@@ -18,6 +18,12 @@ const PATHS = {
   inbox: "M2.5 9l1.8-5.5h7.4L13.5 9v4h-11zM2.5 9H6l.8 1.5h2.4L10 9h3.5",
   external: "M9.5 2.5h4v4M13.5 2.5L8 8M12 9.5v4H2.5V4h4",
   trash: "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 9h5.8l.6-9",
+  briefcase: "M2.5 5.5h11v7.5h-11zM6 5.5V3.5h4v2M2.5 9h11",
+  heart: "M8 13.5S2.5 10.2 2.5 6.3A2.8 2.8 0 0 1 8 5a2.8 2.8 0 0 1 5.5 1.3C13.5 10.2 8 13.5 8 13.5z",
+  wallet: "M2.5 4.5h10a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-10zM2.5 4.5l8-2v2M10.5 9h3",
+  spark: "M8 2v3M8 11v3M2 8h3M11 8h3M4 4l2 2M10 10l2 2M12 4l-2 2M6 10l-2 2",
+  camera: "M2.5 5h2.5l1-1.5h4L11 5h2.5v7.5h-11zM8 6.8a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4z",
+  send: "M2.5 8l11-5-4 11-2-4.5z",
 };
 
 export function Icon({ name, size = 16, className = "" }) {

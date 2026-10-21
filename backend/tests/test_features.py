@@ -154,7 +154,7 @@ def test_missing_key_is_reported_not_raised(db, monkeypatch):
 
 def test_courses_seeded_from_defaults_once(db):
     codes = [c.code for c in scrapers.get_courses(db)]
-    assert codes == ["csse304", "csse313"]
+    assert codes == ["csse304", "csse313", "career", "fitness", "finance"]
     for c in scrapers.get_courses(db):
         db.delete(c)
     db.commit()
@@ -174,7 +174,8 @@ def test_course_api_and_preview(client, monkeypatch):
     ask, _ = fake_gemini([{"title": "HW 5", "kind": "assignment", "due_date": "2099-10-22"}])
     monkeypatch.setattr(scrapers, "ask_gemini", ask)
     monkeypatch.setattr(scrapers, "fetch_html", lambda *a, **k: PAGE)
-    assert len(client.get("/api/courses").get_json()["courses"]) == 2
+    names = [c["name"] for c in client.get("/api/courses").get_json()["courses"]]
+    assert names == ["PLC", "AI", "Career", "Fitness", "Finance"]
     r = client.post("/api/courses", json={"name": "Prac Sec", "url": "https://example.edu/sec", "class_days": "MTRF"})
     assert r.status_code == 201
     c = r.get_json()
@@ -281,3 +282,69 @@ def test_task_course_names_become_course_pages(db):
     assert "Capstone" in names
     cap = next(c for c in scrapers.get_courses(db) if c.name == "Capstone")
     assert cap.parser == "none" and db.scalar(select(Task)).course_id == cap.id
+
+
+# ---- Reader recipes -------------------------------------------------------------------
+
+SCHED = """<html><body><table class="sched">
+<tr><th>Date</th><th>Topic</th><th>Due</th></tr>
+<tr><td>Mon Oct 19</td><td>Buffer overflows</td><td>Lab 4 due 11:59 pm</td></tr>
+<tr><td>Wed Oct 21</td><td>Format strings</td><td>HW 5 due 5:00 pm</td></tr>
+<tr><td>Fri Oct 23</td><td>Review</td><td>Quiz 3 due beginning of class</td></tr>
+<tr><td>Mon Oct 26</td><td>Holiday - no class</td><td></td></tr>
+<tr><td>Wed Oct 28</td><td>Heap</td><td>Lab 5 due 11:59 pm</td></tr>
+</table></body></html>"""
+RECIPE = {"rows": "table.sched tr", "title": {"selector": "td:nth-of-type(3)", "regex": r"^(.*?)\s+due"},
+          "date": {"selector": "td:nth-of-type(1)", "regex": None}, "time": {"selector": "td:nth-of-type(3)", "regex": None},
+          "carry_date": False, "skip": "no class"}
+
+
+def test_recipe_runner_reads_the_page():
+    from planner import recipes
+    rows = recipes.run(RECIPE, SCHED, date(2026, 10, 19))
+    assert [(r["title"], r["date"].isoformat(), r["time"]) for r in rows] == [
+        ("Lab 4", "2026-10-19", time(23, 59)), ("HW 5", "2026-10-21", time(17, 0)),
+        ("Quiz 3", "2026-10-23", None), ("Lab 5", "2026-10-28", time(23, 59))]
+    assert recipes.parse_date_text("27 Oct 2026", date(2026, 10, 1)) == date(2026, 10, 27)
+    assert recipes.parse_date_text("1/12", date(2026, 10, 1)) == date(2027, 1, 12)
+
+
+def test_ai_reads_once_then_recipe_takes_over(db, monkeypatch):
+    from planner import recipes
+    ai_answer = [{"title": "Lab 4", "kind": "assignment", "due_date": "2026-10-19", "due_time": "23:59"},
+                 {"title": "HW 5", "kind": "assignment", "due_date": "2026-10-21", "due_time": "17:00"},
+                 {"title": "Quiz 3", "kind": "quiz", "due_date": "2026-10-23"},
+                 {"title": "Lab 5", "kind": "assignment", "due_date": "2026-10-28", "due_time": "23:59"}]
+    ask, calls = fake_gemini(ai_answer)
+    monkeypatch.setattr(scrapers, "ask_gemini", ask)
+    wrote = []
+    monkeypatch.setattr(recipes, "write_recipe", lambda html, ex: wrote.append(ex) or RECIPE)
+    page = {"html": SCHED}
+    monkeypatch.setattr(scrapers, "fetch_html", lambda *a, **k: page["html"])
+    c = Course(code="sec", name="Security", url="https://example.edu/s", parser="ai", review=False)
+    db.add(c); db.commit()
+    r1 = scrapers.sync_course(db, c, NOW)
+    assert r1["read_with"] == "ai" and r1["recipe"].startswith("saved") and len(calls) == 1
+    assert c.recipe
+    # Page changes (new row): the recipe reads it, no AI call
+    page["html"] = SCHED.replace("</table>", "<tr><td>Fri Oct 30</td><td>Wrap-up</td><td>HW 6 due 11:59 pm</td></tr></table>")
+    r2 = scrapers.sync_course(db, c, NOW)
+    assert r2["read_with"] == "recipe" and len(calls) == 1 and r2["created"] == 1
+    assert db.scalar(select(Task).where(Task.title == "Study: Quiz 3")).due == datetime(2026, 10, 23, 10, 0)
+    # Page redesigned so the recipe finds nothing: back to the AI, which relearns
+    page["html"] = "<div><p>Lab 4 is due Oct 19</p><p>HW 5 due Oct 21 at 5pm</p></div>"
+    r3 = scrapers.sync_course(db, c, NOW)
+    assert r3["read_with"] == "ai" and len(calls) == 2
+
+
+def test_bad_recipe_is_not_saved(db, monkeypatch):
+    from planner import recipes
+    ask, _ = fake_gemini([{"title": "Lab 4", "kind": "assignment", "due_date": "2026-10-19"},
+                          {"title": "HW 5", "kind": "assignment", "due_date": "2026-10-21"}])
+    monkeypatch.setattr(scrapers, "ask_gemini", ask)
+    monkeypatch.setattr(recipes, "write_recipe", lambda html, ex: {**RECIPE, "rows": "ul li"})
+    monkeypatch.setattr(scrapers, "fetch_html", lambda *a, **k: SCHED)
+    c = Course(code="sec", name="Security", url="https://example.edu/s", parser="ai", review=False)
+    db.add(c); db.commit()
+    r = scrapers.sync_course(db, c, NOW)
+    assert r["recipe"].startswith("not reliable") and c.recipe is None

@@ -12,21 +12,28 @@ from flask import Flask, abort, g, jsonify, redirect, request, send_from_directo
 from sqlalchemy import select
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from . import areas as A
+from . import assistant
+from . import syllabus
 from . import grades, gsync, scrapers, service
-from .models import (Block, Course, ExternalEvent, GradeCategory, GradeItem, Routine, Rule, Task,
-                     make_session_factory)
+from .quickadd import repeat_label
+from .models import (AreaEntry, AttendanceLog, Block, Course, ExternalEvent, GradeCategory, GradeItem, Routine, Rule, Setting,
+                     Task, make_session_factory)
 
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")  # Google may return scopes in a different order
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 TASK_FIELDS = {"title", "course", "est_minutes", "done_minutes", "min_total_minutes", "priority",
-               "splittable", "min_block", "max_block", "notes", "status", "position", "sequential", "max_per_day"}
+               "splittable", "min_block", "max_block", "notes", "status", "position", "sequential", "max_per_day",
+               "repeat"}
 ROUTINE_FIELDS = {"title", "days", "window_start", "window_end", "duration", "kind", "active"}
 RULE_FIELDS = {"tag", "weekday", "time", "description"}
-SETTING_KEYS = {"timezone", "day_start", "day_end", "horizon_days", "busy_calendar_ids"}
+SETTING_KEYS = {"timezone", "day_start", "day_end", "horizon_days", "busy_calendar_ids", "calorie_target", "protein_target"}
 COURSE_FIELDS = {"name", "url", "parser", "render_js", "class_days", "class_time", "enabled", "review",
-                 "color", "instructor", "notes", "target_grade"}
+                 "color", "instructor", "notes", "target_grade", "kind", "keywords",
+                 "attend_allowed", "attend_expected", "grade_policies"}
+AREA_KINDS = {"course", "career", "fitness", "finance", "personal"}
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -51,6 +58,7 @@ def task_json(t: Task, rules) -> dict:
         "needs_estimate": t.needs_estimate, "notes": t.notes,
         "parent_id": t.parent_id, "position": t.position, "sequential": t.sequential,
         "course_id": t.course_id, "confidence": t.confidence, "max_per_day": t.max_per_day,
+        "repeat": t.repeat, "repeat_label": repeat_label(t.repeat),
         "is_study": t.title.lower().startswith("study") or any(w in t.title.lower() for w in ("exam", "quiz", "midterm", "final")),
     }
 
@@ -87,7 +95,10 @@ def course_json(c: Course) -> dict:
             "class_days": c.class_days, "class_time": c.class_time, "enabled": c.enabled, "review": c.review,
             "last_sync_at": iso(c.last_sync_at), "last_result": json.loads(c.last_result or "{}"),
             "color": c.color, "instructor": c.instructor, "notes": c.notes,
-            "links": json.loads(c.links or "[]"), "target_grade": c.target_grade}
+            "links": json.loads(c.links or "[]"), "target_grade": c.target_grade,
+            "kind": c.kind or "course", "keywords": c.keywords or "", "has_recipe": bool(c.recipe),
+            "attend_allowed": c.attend_allowed or 0, "attend_expected": c.attend_expected,
+            "grade_policies": c.grade_policies or "", "grade_scale": json.loads(c.grade_scale or "[]")}
 
 
 def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
@@ -144,6 +155,25 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
                 return jsonify(error="Not signed in"), 401
             return fn(*a, **kw)
         return wrapper
+
+    def api_token() -> str | None:
+        row = g.db.get(Setting, "api_token")
+        return row.value if row else None
+
+    def token_or_login(fn):
+        """For the browser extension and phone shortcuts: `Authorization: Bearer <token>` or a session."""
+        @wraps(fn)
+        def wrapper(*a, **kw):
+            auth = request.headers.get("Authorization", "")
+            tok = api_token()
+            if tok and auth.startswith("Bearer ") and secrets.compare_digest(auth[7:].strip(), tok):
+                return fn(*a, **kw)
+            if not session.get("email"):
+                return jsonify(error="Not signed in"), 401
+            return fn(*a, **kw)
+        return wrapper
+
+    app.token_or_login = token_or_login
 
     # ---- Auth (Google sign-in doubles as the Calendar/Tasks connection) -------------------
 
@@ -239,14 +269,24 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             t.needs_estimate = False
 
     @app.post("/api/tasks")
-    @login_required
+    @token_or_login
     def create_task():
         data = request.get_json(force=True)
-        if data.get("text"):  # quick add: "CNN 4/4 ~4h !1 #ai"
+        why = {}
+        if data.get("text"):  # quick add: "submit timesheet by Sunday", "CNN 4/4 ~4h !1 #ai"
             title, meta = service.parse_meta(data["text"])
-            data = {**meta, **{k: v for k, v in data.items() if k != "text"}, "title": title}
-            if isinstance(data.get("tags"), list):
-                data["tags"] = data["tags"]
+            smart = service.smart_fill(g.db, title, service.local_now(g.db)) if not data.get("parent_id") else {"title": title}
+            why = smart.pop("why", {})
+            if smart.get("due"):
+                smart["due"] = iso(smart["due"])
+            if "est_minutes" in meta:
+                smart.pop("est_minutes", None)
+                why.pop("est", None)
+            # explicit fields from the request win, then ~2h-style metadata, then the guesses
+            data = {**smart, **meta, **{k: v for k, v in data.items() if k != "text" and v not in (None, "")}}
+            if not data.get("due") and not data.get("parent_id"):
+                tomorrow = (service.local_now(g.db) + timedelta(days=1)).replace(hour=23, minute=59)
+                data["due"], why["due"] = iso(tomorrow), "no date given, so tomorrow night"
         parent = None
         if data.get("parent_id"):
             parent = g.db.get(Task, int(data["parent_id"]))
@@ -264,18 +304,29 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         apply_task_fields(t, data)
         if "est_minutes" not in data:
             t.est_minutes, t.needs_estimate = 60, True
+        elif why.get("est"):
+            t.needs_estimate = False
         g.db.add(t)
         g.db.commit()
         plan = service.replan(g.db)
-        return jsonify(task=task_json(t, rules()), plan=plan), 201
+        return jsonify(task=task_json(t, rules()), plan=plan, why=why), 201
 
     @app.patch("/api/tasks/<int:tid>")
     @login_required
     def update_task(tid):
         t = g.db.get(Task, tid) or abort(404)
         data = request.get_json(force=True)
-        old_due = t.due
+        old_due, old_status = t.due, t.status
+        if "repeat" in data and data["repeat"] not in (None, "", "daily", "weekdays", "biweekly", "monthly") \
+                and not str(data["repeat"]).startswith("weekly"):
+            return jsonify(error="repeat must be daily, weekdays, weekly, biweekly or monthly"), 400
+        if data.get("repeat") == "weekly":
+            data["repeat"] = f"weekly:{t.due.weekday()}"
         apply_task_fields(t, data)
+        if t.repeat == "":
+            t.repeat = None
+        if old_status != "done" and t.status == "done":
+            service.spawn_next(g.db, t)
         if "due" in data and t.due != old_due:
             # Steps that were following the parent's deadline move with it.
             for c in service.subtasks_of(g.db, t.id):
@@ -409,6 +460,20 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         scrape = request.args.get("scrape", "1") == "1"
         return jsonify(gsync.full_sync(g.db, scrape=scrape))
 
+    def attendance_prompts(now) -> list[dict]:
+        """Courses that track attendance and met today (class time has started)."""
+        code = "MTWRFSU"[now.weekday()]
+        day0 = now.replace(hour=0, minute=0)
+        out = []
+        for c in g.db.scalars(select(Course).where(Course.kind == "course")):
+            tracks = g.db.scalar(select(GradeCategory.id).where(GradeCategory.course_id == c.id,
+                                                                GradeCategory.is_attendance.is_(True)))
+            if not tracks or code not in (c.class_days or "") or now.strftime("%H:%M") < (c.class_time or "10:00"):
+                continue
+            mark = g.db.scalar(select(AttendanceLog).where(AttendanceLog.course_id == c.id, AttendanceLog.day == day0))
+            out.append({"course_id": c.id, "name": c.name, "status": mark.status if mark else None})
+        return out
+
     @app.get("/api/today")
     @login_required
     def today():
@@ -424,6 +489,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         return jsonify(now=iso(now), blocks=blocks_json(g.db, blocks),
                        events=[{"id": e.id, "title": e.title, "start": iso(e.start), "end": iso(e.end)} for e in events],
                        remaining_task_minutes=remaining, needs_checkin=needs_checkin,
+                       attendance=attendance_prompts(now),
                        due_soon=[task_tree_json(g.db, t, rules()) for t in g.db.scalars(
                            select(Task).where(Task.status == "open", Task.parent_id.is_(None),
                                               Task.due < now + timedelta(days=7)).order_by(Task.due).limit(12))],
@@ -488,7 +554,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
     # ---- Courses (schedule pages to pull deadlines from) ----------------------------------------
 
     @app.get("/api/courses")
-    @login_required
+    @token_or_login
     def list_courses():
         out = []
         for c in scrapers.get_courses(g.db):
@@ -499,7 +565,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             nxt = open_tasks[0] if open_tasks else None
             d["stats"] = {"open": len(open_tasks), "next_title": nxt.title if nxt else None,
                           "next_due": iso(nxt.due) if nxt else None,
-                          "grade": grades.summarize(cats, c.target_grade)["current"] if cats else None}
+                          "grade": grade_summary(c)["current"] if cats else None}
             out.append(d)
         return jsonify(courses=out, parsers=scrapers.PARSER_LABELS, colors=scrapers.COLORS,
                        ai_ready=bool(os.getenv("GEMINI_API_KEY")))
@@ -526,6 +592,8 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
                 t.course = c.name
         if source_changed:
             c.page_hash = None  # re-read the page next sync
+            if {"url", "parser"} & data.keys():
+                c.recipe = None
 
     @app.post("/api/courses")
     @login_required
@@ -540,6 +608,8 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         c = Course(code=code, name="", url="", parser="ai", review=True, color=color, links="[]", notes="", instructor="")
         try:
             apply_course(c, {"parser": "ai" if data.get("url") else "none", "review": True, **data})
+            if (c.kind or "course") not in AREA_KINDS:
+                raise ValueError("unknown kind")
         except ValueError as e:
             return jsonify(error=str(e)), 400
         g.db.add(c)
@@ -576,10 +646,21 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         now = service.local_now(g.db)
         upcoming = g.db.scalars(select(Block).where(Block.task_id.in_(ids), Block.end > now - timedelta(days=1))
                                 .order_by(Block.start).limit(40)).all() if ids else []
-        cats = g.db.scalars(select(GradeCategory).where(GradeCategory.course_id == c.id)
-                            .order_by(GradeCategory.position, GradeCategory.id)).all()
         return {"course": course_json(c), "tasks": [task_tree_json(g.db, t, r) for t in tasks],
-                "blocks": blocks_json(g.db, upcoming), "grades": grades.summarize(cats, c.target_grade)}
+                "blocks": blocks_json(g.db, upcoming), "grades": grade_summary(c)}
+
+    def attendance_of(c: Course) -> dict:
+        logs = g.db.scalars(select(AttendanceLog).where(AttendanceLog.course_id == c.id).order_by(AttendanceLog.day)).all()
+        counts = {"present": 0, "absent": 0, "excused": 0}
+        for l in logs:
+            counts[l.status] = counts.get(l.status, 0) + 1
+        return {**counts, "allowed": c.attend_allowed or 0, "expected": c.attend_expected,
+                "free_left": max(0, (c.attend_allowed or 0) - counts["absent"]),
+                "log": [{"id": l.id, "day": l.day.date().isoformat(), "status": l.status} for l in logs[-60:]]}
+
+    def grade_summary(c: Course) -> dict:
+        cats = g.db.scalars(select(GradeCategory).where(GradeCategory.course_id == c.id)).all()
+        return grades.summarize(cats, c.target_grade, attendance_of(c), json.loads(c.grade_scale or "[]"))
 
     @app.get("/api/courses/<int:cid>")
     @login_required
@@ -593,10 +674,14 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         c = g.db.get(Course, cid) or abort(404)
         d = request.get_json(force=True)
         n = len(g.db.scalars(select(GradeCategory).where(GradeCategory.course_id == cid)).all())
+        parent = d.get("parent_id")
+        if parent and (pc := g.db.get(GradeCategory, int(parent))) is None or (parent and pc.course_id != cid):
+            return jsonify(error="parent category not found"), 400
         g.db.add(GradeCategory(course_id=cid, name=d.get("name") or "Category", weight=float(d.get("weight") or 0),
-                               drop_lowest=int(d.get("drop_lowest") or 0), position=n))
+                               drop_lowest=int(d.get("drop_lowest") or 0), position=n,
+                               parent_id=int(parent) if parent else None, is_attendance=bool(d.get("is_attendance"))))
         g.db.commit()
-        return jsonify(course_detail(c)["grades"]), 201
+        return jsonify(grade_summary(c)), 201
 
     @app.patch("/api/grade-categories/<int:gid>")
     @login_required
@@ -606,17 +691,24 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         for k, conv in (("name", str), ("weight", float), ("drop_lowest", int), ("position", int)):
             if k in d:
                 setattr(cat, k, conv(d[k] or 0) if k != "name" else d[k])
+        if "is_attendance" in d:
+            cat.is_attendance = bool(d["is_attendance"])
         g.db.commit()
-        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"])
+        return jsonify(grade_summary(g.db.get(Course, cat.course_id)))
 
     @app.delete("/api/grade-categories/<int:gid>")
     @login_required
     def delete_category(gid):
         cat = g.db.get(GradeCategory, gid) or abort(404)
         cid = cat.course_id
-        g.db.delete(cat)
+        todo, doomed = [cat.id], []
+        while todo:  # subcategories too (don't rely on ON DELETE CASCADE, see syllabus.apply)
+            kids = list(g.db.scalars(select(GradeCategory).where(GradeCategory.parent_id.in_(todo))))
+            doomed += kids
+            todo = [k.id for k in kids]
+        grades.delete_categories(g.db, doomed + [cat])
         g.db.commit()
-        return jsonify(course_detail(g.db.get(Course, cid))["grades"])
+        return jsonify(grade_summary(g.db.get(Course, cid)))
 
     def num_or_none(v):
         return None if v in (None, "") else float(v)
@@ -630,7 +722,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
                            out_of=float(d.get("out_of") or 100)))
         g.db.commit()
         g.db.expire(cat)
-        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"]), 201
+        return jsonify(grade_summary(g.db.get(Course, cat.course_id))), 201
 
     @app.patch("/api/grade-items/<int:iid>")
     @login_required
@@ -646,7 +738,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         g.db.commit()
         cat = g.db.get(GradeCategory, it.category_id)
         g.db.expire(cat)
-        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"])
+        return jsonify(grade_summary(g.db.get(Course, cat.course_id)))
 
     @app.delete("/api/grade-items/<int:iid>")
     @login_required
@@ -656,7 +748,75 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         g.db.delete(it)
         g.db.commit()
         g.db.expire(cat)
-        return jsonify(course_detail(g.db.get(Course, cat.course_id))["grades"])
+        return jsonify(grade_summary(g.db.get(Course, cat.course_id)))
+
+    # ---- Syllabus and attendance --------------------------------------------------------------
+
+    @app.post("/api/courses/<int:cid>/syllabus/read")
+    @login_required
+    def read_syllabus(cid):
+        g.db.get(Course, cid) or abort(404)
+        f = request.files.get("file")
+        text = request.form.get("text") or (request.get_json(silent=True) or {}).get("text")
+        url = request.form.get("url") or (request.get_json(silent=True) or {}).get("url")
+        try:
+            if f is not None:
+                data = f.read()
+                if len(data) > 15 * 1024 * 1024:
+                    return jsonify(error="file is too big (15 MB max)"), 400
+                mime = f.mimetype or "application/pdf"
+                if mime.startswith("text/") or f.filename.lower().endswith((".txt", ".md", ".html", ".htm")):
+                    return jsonify(syllabus.read(text=scrapers.page_text(data.decode("utf-8", "ignore"))))
+                return jsonify(syllabus.read(file_bytes=data, mime=mime))
+            if url:
+                if not url.startswith(("http://", "https://")):
+                    return jsonify(error="that isn't a web address"), 400
+                import requests as rq
+                r = rq.get(url, timeout=30, headers={"User-Agent": "planner/1.0"})
+                r.raise_for_status()
+                if "pdf" in r.headers.get("content-type", "") or url.lower().endswith(".pdf"):
+                    return jsonify(syllabus.read(file_bytes=r.content, mime="application/pdf"))
+                return jsonify(syllabus.read(text=scrapers.page_text(r.text)))
+            if text and text.strip():
+                return jsonify(syllabus.read(text=text))
+        except RuntimeError as e:
+            return jsonify(error=str(e)), 502
+        except Exception as e:
+            return jsonify(error=f"Couldn't read it: {type(e).__name__}: {e}"[:300]), 502
+        return jsonify(error="upload the syllabus, paste its text, or give its link"), 400
+
+    @app.post("/api/courses/<int:cid>/syllabus/apply")
+    @login_required
+    def apply_syllabus(cid):
+        c = g.db.get(Course, cid) or abort(404)
+        d = request.get_json(force=True)
+        if not isinstance(d.get("proposal", {}).get("categories"), list):
+            return jsonify(error="nothing to apply"), 400
+        syllabus.apply(g.db, c, d["proposal"], replace=d.get("replace", True))
+        return jsonify(grade_summary(c))
+
+    @app.post("/api/courses/<int:cid>/attendance")
+    @token_or_login
+    def mark_attendance(cid):
+        """{"status": "present|absent|excused", "day": "2026-10-20"} adds a meeting; {"undo": "absent"} removes the latest."""
+        c = g.db.get(Course, cid) or abort(404)
+        d = request.get_json(force=True)
+        if d.get("undo"):
+            last = g.db.scalar(select(AttendanceLog).where(AttendanceLog.course_id == cid, AttendanceLog.status == d["undo"])
+                               .order_by(AttendanceLog.day.desc(), AttendanceLog.id.desc()))
+            if last:
+                g.db.delete(last)
+        elif d.get("status") in ("present", "absent", "excused"):
+            day = parse_dt(d.get("day")) or service.local_now(g.db)
+            day = day.replace(hour=0, minute=0)
+            if d.get("once"):  # from Today: one mark per class per day
+                for l in g.db.scalars(select(AttendanceLog).where(AttendanceLog.course_id == cid, AttendanceLog.day == day)):
+                    g.db.delete(l)
+            g.db.add(AttendanceLog(course_id=cid, day=day, status=d["status"]))
+        else:
+            return jsonify(error="status must be present, absent or excused"), 400
+        g.db.commit()
+        return jsonify(attendance=attendance_of(c), grades=grade_summary(c))
 
     @app.post("/api/courses/<int:cid>/test")
     @login_required
@@ -667,12 +827,13 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             return jsonify(error="Add a schedule page URL first"), 400
         now = service.local_now(g.db)
         try:
-            items, _ = scrapers.extract(c, now.date())
+            items, _, how = scrapers.extract(c, now.date())
         except Exception as e:
             return jsonify(error=f"{type(e).__name__}: {e}"[:500]), 502
         known = {t.external_id: t.status for t in g.db.scalars(
             select(Task).where(Task.external_id.in_([i.external_id for i in items])))}
-        return jsonify(items=[{"title": i.title, "due": iso(i.due), "kind": i.kind, "past": i.due < now,
+        g.db.rollback()  # a test never changes the course (e.g. dropping a stale recipe)
+        return jsonify(read_with=how, items=[{"title": i.title, "due": iso(i.due), "kind": i.kind, "past": i.due < now,
                                "status": known.get(i.external_id, "new")} for i in items])
 
     @app.post("/api/courses/<int:cid>/sync")
@@ -684,6 +845,139 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         result = scrapers.sync_course(g.db, c, service.local_now(g.db), force=True)
         service.replan(g.db)
         return jsonify(course=course_json(c), result=result)
+
+    # ---- Typed areas (career, fitness, finance) ---------------------------------------------
+
+    def area_or_404(aid):
+        a = g.db.get(Course, aid) or abort(404)
+        return a
+
+    @app.get("/api/areas/<int:aid>/summary")
+    @login_required
+    def area_summary(aid):
+        return jsonify(A.summary(g.db, area_or_404(aid), service.local_now(g.db)))
+
+    @app.post("/api/areas/<int:aid>/entries")
+    @token_or_login
+    def add_area_entry(aid):
+        a = area_or_404(aid)
+        d = request.get_json(force=True)
+        try:
+            e = A.add_entry(g.db, a, d.get("type", ""), parse_dt(d.get("date")), d.get("data") or {})
+        except ValueError as err:
+            g.db.rollback()
+            return jsonify(error=str(err)), 400
+        service.replan(g.db)
+        return jsonify(A.entry_json(e)), 201
+
+    @app.patch("/api/entries/<int:eid>")
+    @login_required
+    def update_area_entry(eid):
+        e = g.db.get(AreaEntry, eid) or abort(404)
+        d = request.get_json(force=True)
+        try:
+            A.update_entry(g.db, e, parse_dt(d.get("date")), d.get("data"), clear_date="date" in d and not d["date"])
+        except ValueError as err:
+            g.db.rollback()
+            return jsonify(error=str(err)), 400
+        service.replan(g.db)
+        return jsonify(A.entry_json(e))
+
+    @app.delete("/api/entries/<int:eid>")
+    @login_required
+    def delete_area_entry(eid):
+        e = g.db.get(AreaEntry, eid) or abort(404)
+        A.delete_entry(g.db, e)
+        service.replan(g.db)
+        return jsonify(ok=True)
+
+    @app.post("/api/fitness/estimate-meal")
+    @token_or_login
+    def estimate_meal():
+        f = request.files.get("photo")
+        if f is None:
+            return jsonify(error="attach a photo"), 400
+        img = f.read()
+        if len(img) > 8 * 1024 * 1024:
+            return jsonify(error="photo is too big (8 MB max)"), 400
+        try:
+            return jsonify(A.estimate_meal(img, f.mimetype or "image/jpeg", request.form.get("note", "")))
+        except Exception as err:
+            return jsonify(error=f"{err}"[:300]), 502
+
+    @app.post("/api/health/ingest")
+    @token_or_login
+    def health_ingest():
+        """Phone automations post daily numbers here: {"date": "2026-10-20", "sleep_minutes": 430, "steps": 8000, ...}."""
+        d = request.get_json(force=True)
+        fitness = next((c for c in scrapers.get_courses(g.db) if c.kind == "fitness"), None)
+        if fitness is None:
+            return jsonify(error="no Fitness area"), 400
+        day = parse_dt(d.get("date")) or service.local_now(g.db)
+        data = {k: d[k] for k in ("sleep_minutes", "steps", "weight", "resting_hr") if k in d}
+        try:
+            e = A.add_entry(g.db, fitness, "metric", day, data)
+        except ValueError as err:
+            return jsonify(error=str(err)), 400
+        return jsonify(A.entry_json(e))
+
+    @app.get("/api/token")
+    @login_required
+    def get_token():
+        return jsonify(token=api_token())
+
+    @app.post("/api/token")
+    @login_required
+    def rotate_token():
+        tok = secrets.token_urlsafe(32)
+        service.set_setting(g.db, "api_token", tok)
+        g.db.commit()
+        return jsonify(token=tok)
+
+    # ---- Assistant ------------------------------------------------------------------------
+
+    @app.post("/api/assistant")
+    @login_required
+    def assistant_chat():
+        msg = (request.get_json(force=True).get("message") or "").strip()
+        if not msg:
+            return jsonify(error="say something"), 400
+        try:
+            return jsonify(assistant.chat(g.db, msg))
+        except RuntimeError as e:
+            return jsonify(error=str(e)), 502
+
+    @app.post("/api/assistant/apply")
+    @login_required
+    def assistant_apply():
+        return jsonify(results=assistant.apply(g.db, request.get_json(force=True).get("actions") or []))
+
+    @app.get("/api/assistant")
+    @login_required
+    def assistant_history():
+        from .models import AssistantMessage, AssistantNote
+        msgs = list(g.db.scalars(select(AssistantMessage).order_by(AssistantMessage.id.desc()).limit(30)))[::-1]
+        return jsonify(messages=[{"id": m.id, "role": m.role, "text": m.text, "actions": json.loads(m.actions or "[]"),
+                                  "at": iso(m.created_at)} for m in msgs],
+                       notes=[{"id": n.id, "text": n.text} for n in g.db.scalars(select(AssistantNote).order_by(AssistantNote.id))])
+
+    @app.delete("/api/assistant/notes/<int:nid>")
+    @login_required
+    def assistant_forget(nid):
+        from .models import AssistantNote
+        n = g.db.get(AssistantNote, nid) or abort(404)
+        g.db.delete(n)
+        g.db.commit()
+        return jsonify(ok=True)
+
+    @app.delete("/api/assistant")
+    @login_required
+    def assistant_clear():
+        from .models import AssistantMessage
+        for m in g.db.scalars(select(AssistantMessage)):
+            g.db.delete(m)
+        g.db.commit()
+        return jsonify(ok=True)
 
     # ---- Frontend ----------------------------------------------------------------------------
 
