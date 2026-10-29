@@ -77,6 +77,12 @@ export default function TaskPanel({ id, ctx, onClose }) {
         </div>
         <div className="k">Done so far</div>
         <div className="v">{hasSteps ? fmtMinutes(t.done_minutes) : <><Field type="number" min="0" step="15" value={t.done_minutes} onSave={(v) => save({ done_minutes: v ?? 0 })} /><span className="faint small">min</span></>}</div>
+        <div className="k">Type</div>
+        <div className="v">
+          <select value={t.kind || "work"} onChange={(e) => save({ kind: e.target.value })}>
+            <option value="work">Work (can be split up)</option><option value="meeting">Meeting / talk (one sitting)</option>
+          </select>
+        </div>
         <div className="k">Priority</div>
         <div className="v">
           <select value={t.priority} onChange={(e) => save({ priority: Number(e.target.value) })}>

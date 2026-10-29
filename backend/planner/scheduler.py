@@ -28,6 +28,7 @@ GRANULARITY = 5  # minutes; all block edges land on multiples of this
 class Interval:
     start: datetime
     end: datetime
+    label: str = ""   # what occupies it (calendar event / pinned block title), for messages
 
     @property
     def minutes(self) -> int:
@@ -43,6 +44,12 @@ class RoutineSpec:
     window_end: time
     duration: int        # minutes
     kind: str = "routine"
+
+    @property
+    def fixed(self) -> bool:
+        """Classes, meetings and appointments happen at a set time; they aren't fitted in."""
+        span = (datetime.combine(date.min, self.window_end) - datetime.combine(date.min, self.window_start)).seconds // 60
+        return self.kind in FIXED_KINDS or span <= self.duration
 
 
 @dataclass
@@ -90,6 +97,19 @@ class PlanResult:
 
 
 DAY_CODES = "MTWRFSU"  # Monday=0 ... Sunday=6, matching date.weekday()
+FIXED_KINDS = {"class", "meeting", "appointment"}
+_STOP = {"with", "meeting", "class", "call", "update", "the", "and", "for", "about"}
+
+
+def _words(t: str) -> set[str]:
+    import re
+    return {w for w in re.findall(r"[a-z0-9]{4,}", (t or "").lower()) if w not in _STOP}
+
+
+def same_thing(a_title: str, a: Interval, b: Interval) -> bool:
+    """Is busy interval `b` (a calendar event, a pinned block) the same meeting as `a`?"""
+    starts_together = abs((a.start - b.start).total_seconds()) <= 10 * 60
+    return starts_together or bool(_words(a_title) & _words(b.label))
 
 
 def fmt_day(d) -> str:
@@ -144,20 +164,39 @@ def build_free_time(now: datetime, horizon_end: datetime, day_start: time, day_e
 
 
 def place_routines(now: datetime, horizon_end: datetime, routines: list[RoutineSpec],
-                   free: list[Interval], skip: set[tuple[int, date]]) -> tuple[list[PlannedBlock], list[Warning], list[Interval]]:
-    """Place each routine occurrence at the earliest free spot in its window.
+                   free: list[Interval], skip: set[tuple[int, date]],
+                   busy: list[Interval] | None = None) -> tuple[list[PlannedBlock], list[Warning], list[Interval]]:
+    """Fixed routines (classes, meetings) go exactly at their time, first. Flexible ones (meals,
+    gym, chores) take the earliest free spot in their window.
 
-    `skip` holds (routine_id, date) pairs that already have a locked/done block.
+    A fixed routine that's already on your calendar (same start, or same name) isn't added twice.
+    One that overlaps something else is kept anyway, with a conflict warning: a meeting happens at
+    its time whether or not the plan has room. `skip` holds (routine_id, date) pairs already handled.
     """
     blocks, warnings = [], []
+    busy = busy or []
     day = now.date()
+    ordered = sorted(routines, key=lambda r: (not r.fixed, r.window_start))
     while datetime.combine(day, time.min) < horizon_end:
         code = DAY_CODES[day.weekday()]
-        for r in routines:
+        for r in ordered:
             if code not in r.days or (r.id, day) in skip:
                 continue
             w_start = datetime.combine(day, r.window_start)
             w_end = datetime.combine(day, r.window_end)
+            if r.fixed:
+                iv = Interval(w_start, w_start + timedelta(minutes=r.duration))
+                if iv.end <= now:
+                    continue
+                clashes = [b for b in busy if b.start < iv.end and b.end > iv.start]
+                if any(same_thing(r.title, iv, b) for b in clashes):
+                    continue  # it's already on your calendar / already placed
+                if clashes:
+                    warnings.append(Warning("warn", f"{r.title} ({fmt_time(iv.start)}) overlaps "
+                                                    f"{clashes[0].label or 'something already scheduled'}"))
+                blocks.append(PlannedBlock(r.title, iv.start, iv.end, "routine", routine_id=r.id))
+                free = subtract(free, iv)
+                continue
             if w_end <= round_up(now):
                 continue  # this occurrence's window has already passed
             placed = False
@@ -171,7 +210,8 @@ def place_routines(now: datetime, horizon_end: datetime, routines: list[RoutineS
                     placed = True
                     break
             if not placed:
-                warnings.append(Warning("warn", f"No room for {r.title} on {fmt_day(day)}"))
+                warnings.append(Warning("warn", f"No room for {r.title} on {fmt_day(day)} between "
+                                                f"{fmt_time(w_start).split(' ', 1)[1]} and {fmt_time(w_end).split(' ', 1)[1]}"))
         day += timedelta(days=1)
     return blocks, warnings, free
 
@@ -259,7 +299,7 @@ def plan(now: datetime, horizon_end: datetime, day_start: time, day_end: time,
          routine_skip: set[tuple[int, date]] | None = None) -> PlanResult:
     result = PlanResult()
     free = build_free_time(now, horizon_end, day_start, day_end, busy)
-    r_blocks, r_warn, free = place_routines(now, horizon_end, routines, free, routine_skip or set())
+    r_blocks, r_warn, free = place_routines(now, horizon_end, routines, free, routine_skip or set(), busy)
     result.blocks += r_blocks
     result.warnings += r_warn
 

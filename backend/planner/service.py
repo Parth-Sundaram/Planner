@@ -127,9 +127,9 @@ def replan(db: Session, now: datetime | None = None) -> dict:
     # 2. Everything that stays is busy time: calendar events, locked/checked-in blocks,
     #    "something came up" blocks, and anything currently in progress.
     kept = db.scalars(select(Block).where(Block.end > now, Block.start < horizon_end)).all()
-    busy = [S.Interval(max(b.start, now), b.end) for b in kept if b.status != "skipped"]  # a skipped slot is free again
+    busy = [S.Interval(max(b.start, now), b.end, b.title) for b in kept if b.status != "skipped"]  # a skipped slot is free again
     for e in db.scalars(select(ExternalEvent).where(ExternalEvent.end > now, ExternalEvent.start < horizon_end)):
-        busy.append(S.Interval(max(e.start, now), e.end))
+        busy.append(S.Interval(max(e.start, now), e.end, e.title))
 
     # A routine that already happened earlier today (or was pinned/checked in) isn't placed again.
     day0 = datetime.combine(now.date(), time.min)
@@ -183,7 +183,7 @@ def replan(db: Session, now: datetime | None = None) -> dict:
         specs.append(S.TaskSpec(
             id=t.id, title=f"{parent.title} › {t.title}" if parent else t.title,
             remaining=remaining, due=t.due, effective_due=eff, priority=priority,
-            splittable=t.splittable, min_block=t.min_block, max_block=t.max_block,
+            splittable=t.splittable and (t.kind or "work") != "meeting", min_block=t.min_block, max_block=t.max_block,
             min_total=(max(0, t.min_total_minutes - t.done_minutes - placed)
                        if t.min_total_minutes is not None else None),
             earliest_start=prep_window(t, day_start_t, now)[0] or (parent.earliest_start if parent else None),
@@ -309,6 +309,17 @@ def something_came_up(db: Session, minutes: int, title: str = "Something came up
     return blk
 
 
+def add_appointment(db: Session, title: str, start: datetime, end: datetime) -> Block:
+    """A one-off fixed-time event (dentist, meeting with a professor). The plan works around it."""
+    if end <= start:
+        raise ValueError("an appointment has to end after it starts")
+    blk = Block(title=title, start=start, end=end, kind="appointment", locked=True)
+    db.add(blk)
+    db.flush()
+    replan(db)
+    return blk
+
+
 def block_time(db: Session, start: datetime, minutes: int, title: str = "Busy") -> Block:
     """Block off time at a given moment (not just now) and replan around it."""
     blk = Block(title=title, start=start, end=start + timedelta(minutes=minutes), kind="busy", locked=True)
@@ -365,7 +376,7 @@ def restore_block(db: Session, block_id: int) -> None:
 def remove_block(db: Session, block_id: int) -> None:
     """Delete a "something came up" block (or any busy block) outright."""
     b = db.get(Block, block_id)
-    if b.kind != "busy":
+    if b.kind not in ("busy", "appointment"):
         raise ValueError("Use Not now or Skip for planned blocks")
     db.delete(b)
     replan(db)
@@ -422,8 +433,20 @@ def smart_fill(db: Session, title: str, now: datetime) -> dict:
     """Fill in due date, repeat, estimate and course/area from a short line. Returns the
     cleaned title plus whatever it could work out, and how ("why") for the UI."""
     from . import quickadd as Q
-    due, repeat, clean = Q.parse_when(title, now)
+    # A time range ("Dentist Thu 2-3pm") or "at 2pm for 30m" with a meeting word makes an appointment:
+    # a fixed block, not work to fit in.
+    r_start, r_end, rest = Q.parse_range(title)
+    dur, rest2 = Q.parse_for(rest if r_start else title)
+    due, repeat, clean = Q.parse_when(rest2 if dur else rest, now)
     out: dict = {"title": clean or title, "why": {}}
+    if r_start and r_end:
+        day = (due or now).date()
+        out["appointment"] = (datetime.combine(day, r_start), datetime.combine(day, r_end))
+    elif dur and due and Q.is_meeting(clean) and due.time() != time(23, 59):
+        out["appointment"] = (due, due + timedelta(minutes=dur))
+    if Q.is_meeting(out["title"]):
+        out["kind"] = "meeting"
+        out["splittable"] = False
     if due:
         out["due"], out["why"]["due"] = due, "from your text"
     if repeat:

@@ -451,7 +451,8 @@ def link_tasks_to_courses(db: Session) -> None:
             code, n = _slug(t.course) or "course", 2
             while db.scalar(select(Course).where(Course.code == code)):
                 code, n = f"{_slug(t.course)}-{n}", n + 1
-            color = next((x for x in COLORS if x not in used), COLORS[len(used) % len(COLORS)])
+            auto = [x for x in COLORS if x != "gray"]  # gray reads as a class/routine on the calendar
+            color = next((x for x in auto if x not in used), auto[len(used) % len(auto)])
             used.append(color)
             c = Course(code=code, name=t.course.strip(), url="", parser="none", review=True, color=color)
             db.add(c)

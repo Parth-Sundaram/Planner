@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import { api, fmtDay, fmtMinutes, fmtTime, minutesBetween } from "./api.js";
 import { CourseTag, Icon, Panel } from "./ui.jsx";
 
-const KIND = { task: "Work block", routine: "Routine", busy: "Blocked time", event: "Google Calendar" };
+const KIND = { work: "Work block", meeting: "Meeting (to fit in)", appointment: "Appointment", class: "Class",
+  routine: "Routine", busy: "Blocked time", event: "Google Calendar" };
 
 // Opens when you click a block on Today or the calendar.
 export default function BlockPanel({ block: b, ctx, onClose }) {
@@ -25,7 +26,7 @@ export default function BlockPanel({ block: b, ctx, onClose }) {
   }
 
   return (
-    <Panel onClose={onClose} actions={<span className="faint small">{KIND[b.kind]}</span>}>
+    <Panel onClose={onClose} actions={<span className="faint small">{KIND[b.kind === "event" ? "event" : b.category || b.kind] || KIND[b.kind]}</span>}>
       <div className="stack" style={{ gap: 6 }}>
         <h2 style={{ fontSize: 19 }}>{b.title}</h2>
         <div className="row muted small">
@@ -58,7 +59,7 @@ export default function BlockPanel({ block: b, ctx, onClose }) {
         </div>
       )}
 
-      {b.kind === "routine" && planned && (
+      {b.kind === "routine" && planned && b.category !== "class" && b.category !== "appointment" && (
         <div className="choices">
           <button className="btn ok" onClick={() => act(() => post("checkin", { status: "done" }), "Done")}><Icon name="check" />Done</button>
           <button className="btn" title="Skip for this day only. It's back tomorrow" onClick={() => act(() => post("skip"), "Skipped for today. That time is free now")}>Skip today</button>
@@ -66,6 +67,9 @@ export default function BlockPanel({ block: b, ctx, onClose }) {
       )}
       {b.kind === "routine" && b.status === "skipped" && (
         <button className="btn primary" onClick={() => act(() => post("restore"), "Back in the plan")}>Put it back</button>
+      )}
+      {b.kind === "appointment" && (
+        <button className="btn danger" onClick={() => act(() => post("remove"), "Appointment removed. Replanned")}><Icon name="trash" />Delete appointment</button>
       )}
       {b.kind === "busy" && (
         <button className="btn danger" onClick={() => act(() => post("remove"), "Removed. Replanned")}><Icon name="trash" />Remove this block</button>
@@ -87,7 +91,7 @@ export default function BlockPanel({ block: b, ctx, onClose }) {
 
       <div className="row">
         {b.task_id && <button className="btn quiet" onClick={() => { onClose(); ctx.openTask(b.parent_task_id || b.task_id); }}>Open task</button>}
-        {b.locked && b.kind !== "busy" && planned && (
+        {b.locked && b.kind === "task" && planned && (
           <button className="btn quiet" onClick={() => act(() => post("unlock"), "Unpinned. The planner can move it again")}>Unpin</button>
         )}
       </div>

@@ -44,6 +44,7 @@ class Task(Base):
     # many days before the deadline the prep is spread over.
     confidence: Mapped[int | None] = mapped_column(Integer)
     max_per_day: Mapped[int | None] = mapped_column(Integer)  # cap on this task's minutes per day
+    kind: Mapped[str] = mapped_column(String(20), default="work")  # work | meeting (a talk/appointment you still need to fit in)
     repeat: Mapped[str | None] = mapped_column(String(30))     # daily | weekdays | weekly:N | biweekly | monthly
     series_id: Mapped[int | None] = mapped_column(Integer)      # first task of a repeating series
 
@@ -84,7 +85,7 @@ class Block(Base):
     title: Mapped[str] = mapped_column(String(300))
     start: Mapped[datetime] = mapped_column(DateTime)
     end: Mapped[datetime] = mapped_column(DateTime)
-    kind: Mapped[str] = mapped_column(String(20))   # task | routine | busy
+    kind: Mapped[str] = mapped_column(String(20))   # task | routine | busy | appointment (fixed, one-off)
     task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
     routine_id: Mapped[int | None] = mapped_column(ForeignKey("routines.id", ondelete="CASCADE"))
     locked: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -43,6 +43,7 @@ REPEAT = [
 
 # Rough default durations, minutes. First match wins, so specific phrases go first.
 DEFAULT_MINUTES = [
+    (r"office hours|talk (?:to|with)|check-?in with|advisor|1:1", 15),
     (r"timesheet|time sheet|hours log", 15), (r"\bemail|reply|respond|text\b|message", 10),
     (r"\bpay\b|bill|rent|venmo|transfer", 10), (r"\bsubmit\b|upload|turn in", 15),
     (r"\bschedule\b|book|register|sign up|rsvp", 15), (r"compose|post\b|discussion", 20),
@@ -160,6 +161,45 @@ def _clean(t: str) -> str:
     t = re.sub(r"\b(by|due|on|before|at)$", "", t, flags=re.I).strip(" ,;-")
     first = t.split(" ", 1)[0] if t else ""
     return t[:1].upper() + t[1:] if first.isalpha() else t
+
+
+MEETING = re.compile(r"\b(meet(?:ing)?(?: with)?|appointment|appt|call with|office hours|talk (?:to|with)|interview|"
+                     r"dentist|doctor|1:1|one[- ]on[- ]one|advisor|check-?in with|coffee with|lunch with|dinner with)\b", re.I)
+RANGE = re.compile(r"\b(?:from\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|to)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.I)
+FOR = re.compile(r"\bfor\s+(\d+(?:\.\d+)?)\s*(h|hr|hrs|hours?|m|min|mins|minutes)\b", re.I)
+
+
+def is_meeting(title: str) -> bool:
+    return bool(MEETING.search(title))
+
+
+def parse_range(text: str) -> tuple[time | None, time | None, str]:
+    """'2-3pm', '1:30 to 2:15pm', '10am-11am' -> (start, end, text without it)."""
+    m = RANGE.search(text)
+    if not m:
+        return None, None, text
+    ap_end = m.group(6)
+    ap_start = m.group(3) or ap_end
+    end = _clock(m.group(4), m.group(5), ap_end)
+    start = _clock(m.group(1), m.group(2), ap_start)
+    if start and end and start >= end and not m.group(3) and ap_start == "pm":
+        start = _clock(m.group(1), m.group(2), "am")  # "11-1pm" means 11am to 1pm
+    if not start or not end or start >= end:
+        return None, None, text
+    return start, end, _clean(text.replace(m.group(0), " "))
+
+
+def parse_for(text: str) -> tuple[int | None, str]:
+    """'for 30 min' / 'for 1h' -> minutes."""
+    m = FOR.search(text)
+    if not m:
+        return None, text
+    return _to_min(m.group(1), m.group(2)), _clean(text.replace(m.group(0), " "))
+
+
+def _to_min(num: str, unit: str) -> int:
+    v = float(num)
+    return int(round(v * 60)) if unit.lower().startswith("h") else int(round(v))
 
 
 def default_minutes(title: str) -> int | None:

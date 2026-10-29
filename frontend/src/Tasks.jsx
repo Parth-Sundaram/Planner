@@ -92,6 +92,7 @@ export function TaskLine({ t, ctx, act }) {
         <div className="tt ellipsis">{t.title}</div>
         <div className="meta">
           <CourseTag course={course} />
+          {t.kind === "meeting" && <span className="tag meet">meeting</span>}
           {steps.length > 0 && <span className="tag">{doneSteps}/{steps.length} steps</span>}
           {t.is_study && !t.confidence && t.status === "open" && <span className="tag accent">set confidence</span>}
           {t.needs_estimate && !t.is_study && <span className="tag warn">guess: {fmtMinutes(t.est_minutes)}</span>}
@@ -118,6 +119,12 @@ export function QuickAdd({ ctx, courseId }) {
     if (!text.trim()) return;
     try {
       const r = await api.post("/api/tasks", { text, ...(due ? { due } : {}), ...(course ? { course_id: Number(course) } : {}) });
+      if (r.appointment) {
+        const a = r.appointment;
+        ctx.notify(`Appointment: "${a.title}" ${fmtDue(a.start)}–${new Date(a.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}. The plan moves around it`);
+        setText(""); setDue(""); ctx.refresh();
+        return;
+      }
       const t = r.task, area = ctx.courseById[t.course_id];
       ctx.notify(`Added "${t.title}": due ${fmtDue(t.due)} · ${fmtMinutes(t.est_minutes)}${t.needs_estimate ? " (guess)" : ""}` +
         `${area ? ` · ${area.name}` : ""}${t.repeat_label ? ` · ${t.repeat_label}` : ""}`);
@@ -138,7 +145,7 @@ export function QuickAdd({ ctx, courseId }) {
         <input type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} aria-label="Due (optional)" title="Optional. Leave empty and write the date in the text" />
         <button className="btn primary">Add</button>
       </div>
-      <div className="hint">Dates, repeats, time and course are worked out from the text · <code>~2h</code> time needed · <code>!1</code> high priority · <code>#tag</code> · <code>squeeze:1h</code> can shrink to · <code>min:45</code> shortest sitting · <code>nosplit</code></div>
+      <div className="hint">Dates, repeats, time and course are worked out from the text. A time range ("Dentist Thu 2-3pm") makes an appointment · <code>~2h</code> time needed · <code>!1</code> high priority · <code>#tag</code> · <code>squeeze:1h</code> can shrink to · <code>min:45</code> shortest sitting · <code>nosplit</code></div>
     </form>
   );
 }

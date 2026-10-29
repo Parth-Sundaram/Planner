@@ -4,7 +4,7 @@ import { Icon } from "./ui.jsx";
 
 const DAYS = [["M", "Mon"], ["T", "Tue"], ["W", "Wed"], ["R", "Thu"], ["F", "Fri"], ["S", "Sat"], ["U", "Sun"]];
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const KINDS = [["class", "Class"], ["meal", "Meal"], ["gym", "Gym"], ["chore", "Chore"], ["routine", "Other"]];
+const KINDS = [["class", "Class (fixed)"], ["meeting", "Meeting (fixed)"], ["meal", "Meal"], ["gym", "Gym"], ["chore", "Chore"], ["routine", "Other"]];
 
 export default function Settings({ ctx }) {
   const [routines, setRoutines] = useState([]);
@@ -59,7 +59,7 @@ export default function Settings({ ctx }) {
 
       <div className="set-card">
         <h3>Weekly routine</h3>
-        <p className="muted small" style={{ margin: 0 }}>Fixed things (classes) use a window equal to their length. Meals, gym and chores get a window and float inside it.</p>
+        <p className="muted small" style={{ margin: 0 }}>Classes and meetings happen exactly at their start time, and the plan works around them. Meals, gym and chores get a window and float inside it.</p>
         <div>
           {routines.map((r) => <RoutineRow key={r.id} r={r} act={act} />)}
           <RoutineRow r={{ title: "", days: "MTWRF", window_start: "12:00", window_end: "13:45", duration: 45, kind: "meal", active: true }} act={act} isNew />

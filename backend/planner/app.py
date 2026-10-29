@@ -27,7 +27,7 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 TASK_FIELDS = {"title", "course", "est_minutes", "done_minutes", "min_total_minutes", "priority",
                "splittable", "min_block", "max_block", "notes", "status", "position", "sequential", "max_per_day",
-               "repeat"}
+               "repeat", "kind"}
 ROUTINE_FIELDS = {"title", "days", "window_start", "window_end", "duration", "kind", "active"}
 RULE_FIELDS = {"tag", "weekday", "time", "description"}
 SETTING_KEYS = {"timezone", "day_start", "day_end", "horizon_days", "busy_calendar_ids", "calorie_target", "protein_target"}
@@ -69,7 +69,7 @@ def task_json(t: Task, rules) -> dict:
         "needs_estimate": t.needs_estimate, "notes": t.notes,
         "parent_id": t.parent_id, "position": t.position, "sequential": t.sequential,
         "course_id": t.course_id, "confidence": t.confidence, "max_per_day": t.max_per_day,
-        "repeat": t.repeat, "repeat_label": repeat_label(t.repeat),
+        "repeat": t.repeat, "repeat_label": repeat_label(t.repeat), "kind": t.kind or "work",
         "is_study": is_study(t.title),
     }
 
@@ -86,18 +86,28 @@ def task_tree_json(db, t: Task, rules) -> dict:
     return d
 
 
-def block_json(b: Block, tasks: dict | None = None) -> dict:
+def block_json(b: Block, tasks: dict | None = None, routines: dict | None = None) -> dict:
     t = tasks.get(b.task_id) if tasks and b.task_id else None
+    r = routines.get(b.routine_id) if routines and b.routine_id else None
+    if b.kind == "appointment" or (r is not None and r.kind in ("class", "meeting", "appointment")):
+        category = "class" if r is not None and r.kind == "class" else "appointment"
+    elif t is not None and (t.kind or "work") == "meeting":
+        category = "meeting"
+    else:
+        category = {"task": "work", "routine": "routine", "busy": "busy"}.get(b.kind, b.kind)
     return {"id": b.id, "title": b.title, "start": iso(b.start), "end": iso(b.end), "kind": b.kind,
             "task_id": b.task_id, "routine_id": b.routine_id, "locked": b.locked,
             "status": b.status, "done_minutes": b.done_minutes,
-            "course_id": t.course_id if t else None, "parent_task_id": t.parent_id if t else None}
+            "course_id": t.course_id if t else None, "parent_task_id": t.parent_id if t else None,
+            "category": category}
 
 
 def blocks_json(db, blocks) -> list[dict]:
     ids = {b.task_id for b in blocks if b.task_id}
     tasks = {t.id: t for t in db.scalars(select(Task).where(Task.id.in_(ids)))} if ids else {}
-    return [block_json(b, tasks) for b in blocks]
+    rids = {b.routine_id for b in blocks if b.routine_id}
+    routines = {r.id: r for r in db.scalars(select(Routine).where(Routine.id.in_(rids)))} if rids else {}
+    return [block_json(b, tasks, routines) for b in blocks]
 
 
 def course_json(c: Course) -> dict:
@@ -295,6 +305,10 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
                 why.pop("est", None)
             # explicit fields from the request win, then ~2h-style metadata, then the guesses
             data = {**smart, **meta, **{k: v for k, v in data.items() if k != "text" and v not in (None, "")}}
+            appt = smart.pop("appointment", None)
+            if appt and not data.get("parent_id"):
+                blk = service.add_appointment(g.db, smart.get("title") or title, appt[0], appt[1])
+                return jsonify(appointment=block_json(blk), why={"kind": "appointment"}), 201
             if not data.get("due") and not data.get("parent_id"):
                 tomorrow = (service.local_now(g.db) + timedelta(days=1)).replace(hour=23, minute=59)
                 data["due"], why["due"] = iso(tomorrow), "no date given, so tomorrow night"
@@ -454,6 +468,19 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
     @login_required
     def block_remove(bid):
         return block_action(bid, service.remove_block)
+
+    @app.post("/api/appointments")
+    @token_or_login
+    def create_appointment():
+        d = request.get_json(force=True)
+        start, end = parse_dt(d.get("start")), parse_dt(d.get("end"))
+        if not d.get("title") or not start or not end:
+            return jsonify(error="title, start and end are required"), 400
+        try:
+            blk = service.add_appointment(g.db, d["title"].strip()[:300], start, end)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        return jsonify(appointment=block_json(blk)), 201
 
     @app.post("/api/came-up")
     @login_required
@@ -1182,4 +1209,3 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         return "Frontend not built yet. Run `npm run build` in frontend/.", 200
 
     return app
-

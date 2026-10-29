@@ -67,7 +67,7 @@ export default function Today({ ctx }) {
               return (
                 <React.Fragment key={i.key}>
                   {idx === nowIdx && !current && <div className="nowline"><span>{fmtTime(data.now)}</span><i /></div>}
-                  <div className={`tl ${i.kind} ${i.status || ""} ${past ? "past" : ""} ${current?.key === i.key ? "now" : ""} c-${course?.color || "none"}`}
+                  <div className={`tl ${i.kind} cat-${i.kind === "event" ? "event" : i.category || i.kind} ${i.status || ""} ${past ? "past" : ""} ${current?.key === i.key ? "now" : ""} c-${course?.color || "none"}`}
                        onClick={() => ctx.openBlock(i)}>
                     <div className="t">{fmtTime(i.start)}</div>
                     <div className="bar" />
