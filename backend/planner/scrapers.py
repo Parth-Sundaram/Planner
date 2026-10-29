@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
 import requests
+
+from . import gemini
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -267,7 +269,7 @@ def ask_gemini(prompt: str) -> list[dict]:
     if not key:
         raise RuntimeError("GEMINI_API_KEY isn't set. Add a free key from Google AI Studio in Render's environment.")
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    r = requests.post(GEMINI_URL.format(model=model), headers={"x-goog-api-key": key}, timeout=90, json={
+    r = gemini.post(model, key, timeout=90, json={
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json", "responseSchema": AI_SCHEMA},
     })
@@ -422,6 +424,12 @@ def get_courses(db: Session, enabled_only: bool = False) -> list[Course]:
                 db.add(Course(code=kind, name=name, kind=kind, url="", parser="none", color=color,
                               review=True, links="[]", notes="", instructor="", keywords=""))
         db.add(Setting(key="areas_seeded", value="1"))
+        db.commit()
+    if db.get(Setting, "personal_seeded") is None:
+        if not db.scalar(select(Course).where(Course.kind == "personal")):
+            db.add(Course(code="personal", name="Personal", kind="personal", url="", parser="none", color="pink",
+                          review=True, links="[]", notes="", instructor="", keywords=""))
+        db.add(Setting(key="personal_seeded", value="1"))
         db.commit()
     link_tasks_to_courses(db)
     q = select(Course).order_by(Course.id)

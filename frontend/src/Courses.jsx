@@ -2,7 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, fmtDay, fmtDue, fmtMinutes, fmtTime, localInput } from "./api.js";
 import { Field, Icon } from "./ui.jsx";
 import Tasks from "./Tasks.jsx";
-import { CareerModule, FinanceModule, FitnessModule } from "./Areas.jsx";
+import { HabitsPage } from "./Habits.jsx";
+import { CareerModule, FinanceModule, FitnessModule, PersonalModule } from "./Areas.jsx";
 
 const COLORS = ["blue", "green", "purple", "orange", "pink", "teal", "yellow", "red", "gray"];
 const DAYS = [["M", "Mon"], ["T", "Tue"], ["W", "Wed"], ["R", "Thu"], ["F", "Fri"], ["S", "Sat"], ["U", "Sun"]];
@@ -218,6 +219,7 @@ function Grades({ d, ctx, reload, save }) {
       {g.categories.map((cat) => <CategoryNode key={cat.id} cat={cat} depth={0} call={call} courseId={c.id} />)}
 
       <NewCategory courseId={c.id} call={call} />
+      <MoodleGradebook courseId={c.id} version={ctx.version} />
       {c.grade_policies && <div className="box pad" style={{ marginTop: 16 }}><div className="subhead">From the syllabus</div>
         <div className="small" style={{ whiteSpace: "pre-wrap" }}>{c.grade_policies}</div></div>}
       <div className="hint">Leave a score empty if it isn't graded yet. "You need" counts everything ungraded, empty categories and the class meetings still to come.</div>
@@ -506,7 +508,7 @@ const AREA_TABS = {
   career: [["main", "Applications"], ["tasks", "To do"], ["notes", "Notes"]],
   fitness: [["main", "Log"], ["tasks", "To do"], ["notes", "Notes"]],
   finance: [["main", "Money"], ["tasks", "To do"], ["notes", "Notes"]],
-  personal: [["tasks", "To do"], ["notes", "Notes"]],
+  personal: [["habits", "Habits"], ["promises", "Promises"], ["money", "Money"], ["memos", "Remember"], ["tasks", "To do"], ["notes", "Notes"]],
 };
 
 function AreaPage({ d, ctx, reload }) {
@@ -520,7 +522,7 @@ function AreaPage({ d, ctx, reload }) {
   return (
     <div className={`page c-${c.color}`}>
       <div className="course-head">
-        <div className="course-icon"><Icon name={{ career: "briefcase", fitness: "heart", finance: "wallet" }[c.kind] || "book"} size={20} /></div>
+        <div className="course-icon"><Icon name={{ career: "briefcase", fitness: "heart", finance: "wallet", personal: "hand" }[c.kind] || "book"} size={20} /></div>
         <Field className="course-title" value={c.name} onSave={(v) => v && save({ name: v }, "Renamed")} aria-label="Area name" />
         <div className="row muted small"><span><b style={{ color: "var(--text)" }}>{open.length}</b> open</span>
           <span className="faint">·</span>
@@ -535,8 +537,30 @@ function AreaPage({ d, ctx, reload }) {
       {tab === "main" && c.kind === "career" && <CareerModule area={c} ctx={ctx} />}
       {tab === "main" && c.kind === "fitness" && <FitnessModule area={c} ctx={ctx} />}
       {tab === "main" && c.kind === "finance" && <FinanceModule area={c} ctx={ctx} />}
+      {["promises", "money", "memos"].includes(tab) && <PersonalModule area={c} ctx={ctx} tab={tab} />}
+      {tab === "habits" && <HabitsPage ctx={ctx} />}
       {tab === "tasks" && <Tasks ctx={ctx} courseId={c.id} embedded />}
       {tab === "notes" && <Notes c={c} save={save} />}
+    </div>
+  );
+}
+
+
+function MoodleGradebook({ courseId, version }) {
+  const [rows, setRows] = useState([]);
+  useEffect(() => { api.get(`/api/courses/${courseId}/moodle-grades`).then(setRows).catch(() => setRows([])); }, [courseId, version]);
+  if (!rows.length) return null;
+  const total = rows.find((r) => r.type === "course");
+  return (
+    <div className="box pad" style={{ marginTop: 16 }}>
+      <div className="row between"><b>Moodle gradebook</b>{total && <span className="muted small">Moodle's course total: <b>{total.percent || `${total.score}/${total.max}`}</b></span>}</div>
+      <div className="hint" style={{ marginTop: 2 }}>Scores whose names match an item above are filled in on each sync.</div>
+      <div className="mini-list" style={{ marginTop: 6 }}>
+        {rows.filter((r) => r.type !== "course" && r.name).map((r, i) => (
+          <div key={i} className="previewrow"><span>{r.name}{r.type === "category" ? " (category)" : ""}</span>
+            <span className="muted">{r.score == null ? "not graded" : `${r.score} / ${r.max}`}</span></div>
+        ))}
+      </div>
     </div>
   );
 }

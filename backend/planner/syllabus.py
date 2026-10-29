@@ -9,6 +9,8 @@ import json
 import os
 
 import requests
+
+from . import gemini
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -68,8 +70,7 @@ def read(file_bytes: bytes | None = None, mime: str | None = None, text: str | N
         parts.append({"inline_data": {"mime_type": mime or "application/pdf", "data": base64.b64encode(file_bytes).decode()}})
     if text:
         parts.append({"text": "SYLLABUS:\n" + text[:120_000]})
-    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                      headers={"x-goog-api-key": key}, timeout=120, json={
+    r = gemini.post(model, key, timeout=120, json={
         "contents": [{"parts": parts}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json", "responseSchema": SCHEMA},
     })

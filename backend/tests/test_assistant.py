@@ -89,3 +89,30 @@ def test_several_block_actions_survive_replans_in_between(db):
     assert all(r["ok"] for r in res), res
     skipped = {b.start.date() for b in db.scalars(select(Block).where(Block.status == "skipped"))}
     assert skipped == {gym_tmrw.start.date(), gym_next.start.date()}
+
+
+def test_money_and_promise_tools(db):
+    from planner.scrapers import get_courses
+    get_courses(db)  # seeds the Personal area
+    res = assistant.apply(db, [
+        {"id": 0, "name": "log_money", "args": {"person": "Sanil", "amount": 18, "direction": "i_owe", "note": "Chipotle"}},
+        {"id": 1, "name": "make_promise", "args": {"text": "Send demo video", "to": "Rishi", "by": "2026-10-22T18:00"}},
+        {"id": 2, "name": "pin_memo", "args": {"text": "Bring laptop charger Friday"}}])
+    assert all(r["ok"] for r in res), res
+    snap = assistant.snapshot(db, NOW)
+    assert "Sanil | $18.00 | user owes them" in snap and "Send demo video" in snap and "Bring laptop charger" in snap
+    eid = int(snap.split("MONEY")[1].splitlines()[1].split("|")[0].strip()[1:])
+    assert assistant.apply(db, [{"id": 3, "name": "settle_money", "args": {"entry_id": f"e{eid}"}}])[0]["ok"]
+    assert "Sanil | $18.00" not in assistant.snapshot(db, NOW)
+
+
+def test_tick_habit_tool(db):
+    from planner.models import Habit
+    from planner import habits as HB
+    db.add(Habit(name="Drink water (bottles)", target=3)); db.commit()
+    snap = assistant.snapshot(db, NOW)
+    assert "Drink water (bottles) | no (0.0/3.0)" in snap
+    hid = db.scalar(select(Habit)).id
+    assert assistant.apply(db, [{"id": 0, "name": "tick_habit", "args": {"habit_id": f"h{hid}", "amount": 2}}])[0]["ok"]
+    h = HB.summary(db, NOW.date(), 7)[0]
+    assert h["today"]["value"] == 2.0 and not h["today"]["done"]

@@ -20,6 +20,8 @@ import re
 from datetime import date, datetime, time
 
 import requests
+
+from . import gemini
 from bs4 import BeautifulSoup
 
 MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -155,8 +157,7 @@ def write_recipe(html: str, examples: list[dict]) -> dict:
         "Prefer stable selectors (tag structure, nth-of-type) over long class chains.\n\n"
         f"DEADLINES FOUND:\n{sample}\n\nHTML:\n{simplify_html(html)}"
     )
-    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                      headers={"x-goog-api-key": key}, timeout=90, json={
+    r = gemini.post(model, key, timeout=90, json={
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json", "responseSchema": RECIPE_SCHEMA},
     })

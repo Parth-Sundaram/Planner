@@ -14,6 +14,8 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
 import requests
+
+from . import gemini
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,11 +25,11 @@ ENTRY_TYPES = {
     "career": {"job"},
     "fitness": {"meal", "workout", "metric"},
     "finance": {"bill", "expense", "budget"},
-    "personal": set(), "course": set(),
+    "personal": {"iou", "promise", "memo"}, "course": set(),
 }
 JOB_STAGES = ["wishlist", "applied", "online assessment", "interview", "final round", "offer", "rejected", "withdrawn"]
 NUMERIC = {"calories", "protein", "carbs", "fat", "minutes", "sleep_minutes", "steps", "weight", "resting_hr",
-           "amount", "limit"}
+           "avg_hr", "min_hr", "max_hr", "amount", "limit"}
 
 
 def _clean(etype: str, data: dict) -> dict:
@@ -40,10 +42,16 @@ def _clean(etype: str, data: dict) -> dict:
                 out[k] = float(v) if k in ("weight", "amount", "limit", "protein", "carbs", "fat") else int(float(v))
             except (TypeError, ValueError):
                 raise ValueError(f"{k} must be a number")
+        elif k == "closed_on" and isinstance(v, str):
+            out[k] = v[:10]
         elif isinstance(v, (str, bool)) or v is None:
             out[k] = v.strip()[:500] if isinstance(v, str) else v
     if etype == "job" and out.get("stage") and out["stage"] not in JOB_STAGES:
         raise ValueError(f"stage must be one of: {', '.join(JOB_STAGES)}")
+    if etype == "iou" and out.get("direction", "they_owe") not in ("they_owe", "i_owe"):
+        raise ValueError("direction must be they_owe or i_owe")
+    if etype == "promise" and out.get("status", "open") not in ("open", "kept", "broken"):
+        raise ValueError("status must be open, kept or broken")
     if etype == "bill" and out.get("frequency", "monthly") not in ("weekly", "biweekly", "monthly", "yearly", "once"):
         raise ValueError("frequency must be weekly, biweekly, monthly, yearly or once")
     return out
@@ -64,11 +72,23 @@ def _sync_task(db: Session, area: Course, e: AreaEntry) -> None:
         repeat = {"weekly": f"weekly:{e.date.weekday()}", "biweekly": "biweekly", "monthly": "monthly"}.get(freq)
         amt = f" (${d['amount']:,.2f})" if d.get("amount") else ""
         want = (f"Pay {d.get('name', 'bill')}{amt}", e.date, 10, repeat)
+    elif e.type == "iou" and e.date and not d.get("settled") and d.get("amount"):
+        amt = f"${d['amount']:,.2f}"
+        who = d.get("person", "them")
+        want = ((f"Pay {who} back {amt}", e.date, 10, None) if d.get("direction") == "i_owe"
+                else (f"Remind {who} about the {amt} they owe you", e.date, 5, None))
+    elif e.type == "promise" and e.date and d.get("status", "open") == "open":
+        to = d.get("to")
+        title = d.get("text", "Promise") + (f" (promised {to})" if to and to.lower() not in ("me", "myself") else "")
+        want = (title[:300], e.date, int(d.get("minutes") or 30), None)
     t = db.get(Task, e.task_id) if e.task_id else None
     if want is None:
         if t is not None and t.status == "open":
-            db.delete(t)
-        e.task_id = None
+            if e.type == "promise" and d.get("status") == "kept":
+                t.status = "done"   # keep the record of having done it
+            else:
+                db.delete(t)
+                e.task_id = None
         return
     title, due, minutes, repeat = want
     if t is None or t.status != "open":
@@ -104,6 +124,8 @@ def add_entry(db: Session, area: Course, etype: str, when: datetime | None, data
 
 
 def update_entry(db: Session, e: AreaEntry, when: datetime | None, data: dict | None, clear_date: bool = False) -> AreaEntry:
+    if data is not None and e.type == "promise" and data.get("status") in ("kept", "broken"):
+        data = {**data, "closed_on": datetime.now().date().isoformat()}
     if data is not None:
         e.data = json.dumps({**json.loads(e.data or "{}"), **_clean(e.type, data)})
     if when is not None or clear_date:
@@ -156,7 +178,8 @@ def summary(db: Session, area: Course, now: datetime) -> dict:
                    "meals": [entry_json(m) for m in by["meal"] if m.date and m.date.date() == now.date()]},
             days=[{"date": d.isoformat(), "calories": round(cal[d]), "protein": round(prot[d]),
                    "sleep_minutes": metrics.get(d, {}).get("sleep_minutes"), "steps": metrics.get(d, {}).get("steps"),
-                   "weight": metrics.get(d, {}).get("weight"), "workout_minutes": workouts[d]} for d in days],
+                   "weight": metrics.get(d, {}).get("weight"), "resting_hr": metrics.get(d, {}).get("resting_hr"),
+                   "avg_hr": metrics.get(d, {}).get("avg_hr"), "workout_minutes": workouts[d]} for d in days],
             workouts=[entry_json(w) for w in by["workout"][:20]],
         )
     elif kind == "career":
@@ -165,6 +188,32 @@ def summary(db: Session, area: Course, now: datetime) -> dict:
         for j in jobs:
             counts[j["data"].get("stage", "wishlist")] += 1
         out.update(jobs=jobs, stages=JOB_STAGES, counts=counts)
+    elif kind == "personal":
+        balances: dict[str, float] = defaultdict(float)
+        open_ious = []
+        for x in by["iou"]:
+            d = json.loads(x.data)
+            if d.get("settled"):
+                continue
+            amt = d.get("amount", 0) * (1 if d.get("direction", "they_owe") == "they_owe" else -1)
+            balances[d.get("person") or "Someone"] += amt
+            open_ious.append(entry_json(x))
+        promises = [entry_json(p) for p in by["promise"]]
+        recent = [p for p in promises if p["data"].get("status") in ("kept", "broken")
+                  and (p["data"].get("closed_on") or "") >= (now - timedelta(days=60)).date().isoformat()]
+        kept = sum(p["data"].get("status") == "kept" for p in recent)
+        memos = sorted((entry_json(m) for m in by["memo"]), key=lambda m: (not m["data"].get("pinned"), -m["id"]))
+        out.update(
+            balances=[{"person": k, "net": round(v, 2)} for k, v in sorted(balances.items(), key=lambda kv: -abs(kv[1])) if abs(v) > 0.004],
+            owed_to_me=round(sum(v for v in balances.values() if v > 0), 2),
+            i_owe=round(-sum(v for v in balances.values() if v < 0), 2),
+            ious=open_ious, settled=[entry_json(x) for x in by["iou"] if json.loads(x.data).get("settled")][:20],
+            promises_open=sorted([p for p in promises if p["data"].get("status", "open") == "open"],
+                                 key=lambda p: p["date"] or "9999"),
+            promises_closed=[p for p in promises if p["data"].get("status") in ("kept", "broken")][:30],
+            word={"kept": kept, "total": len(recent)},
+            memos=memos,
+        )
     elif kind == "finance":
         month0 = now.date().replace(day=1)
         spent = defaultdict(float)
@@ -205,8 +254,7 @@ def estimate_meal(image: bytes, mime: str, note: str = "") -> dict:
     prompt = ("Estimate the nutrition of the food in this photo. Identify each item and its portion from visual cues "
               "(plate size, utensils, packaging). Use typical US dining-hall portions when unsure. Totals must equal the "
               "sum of the items." + (f" The person says: {note}" if note else ""))
-    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                      headers={"x-goog-api-key": key}, timeout=60, json={
+    r = gemini.post(model, key, timeout=60, json={
         "contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": base64.b64encode(image).decode()}},
                                 {"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json", "responseSchema": MEAL_SCHEMA},

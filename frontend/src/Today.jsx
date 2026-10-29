@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api, fmtDue, fmtMinutes, fmtTime, minutesBetween } from "./api.js";
 import { CourseTag, Icon } from "./ui.jsx";
+import { HabitStrip } from "./Habits.jsx";
 
 export default function Today({ ctx }) {
   const [data, setData] = useState(null);
@@ -88,6 +89,7 @@ export default function Today({ ctx }) {
         </div>
 
         <aside className="rail">
+          <HabitStrip ctx={ctx} />
           {data.warnings.length > 0 && (
             <div>
               <div className="section-title">Heads up</div>
@@ -95,6 +97,22 @@ export default function Today({ ctx }) {
                 {data.warnings.slice(0, 6).map((w, i) => (
                   <div key={i} className={`warn-line ${w.level}`} onClick={() => w.task_id && ctx.openTask(w.task_id)} style={{ cursor: w.task_id ? "pointer" : "default" }}>{w.message}</div>
                 ))}
+              </div>
+            </div>
+          )}
+          {data.personal && (data.personal.pinned.length > 0 || data.personal.promises.length > 0) && (
+            <div>
+              <div className="section-title">Remember<a className="btn quiet sm" href={`#/courses/${data.personal.area_id}`}>All</a></div>
+              <div className="stack" style={{ gap: 4 }}>
+                {data.personal.pinned.map((m) => <div key={m.id} className="warn-line info" style={{ color: "var(--text)" }}><Icon name="pin" size={13} />{m.data.text}</div>)}
+                {data.personal.promises.map((p) => (
+                  <div key={p.id} className="row between small" style={{ padding: "3px 6px" }}>
+                    <span className="grow"><b style={{ fontWeight: 500 }}>Promised:</b> {p.data.text}{p.data.to && p.data.to !== "myself" ? ` (to ${p.data.to})` : ""}</span>
+                    {p.date && <span className="faint">{fmtDue(p.date, now)}</span>}
+                    <button className="btn ok sm" onClick={() => act(() => api.patch(`/api/entries/${p.id}`, { data: { status: "kept" } }), "Kept. That counts")}>Kept</button>
+                  </div>
+                ))}
+                {data.personal.word.total > 0 && <div className="faint small" style={{ padding: "2px 6px" }}>Word kept: {data.personal.word.kept} of {data.personal.word.total} in the last 60 days</div>}
               </div>
             </div>
           )}

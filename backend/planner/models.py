@@ -203,6 +203,44 @@ class AssistantMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class Habit(Base):
+    """A daily habit. `source` lets the planner tick it for you from data you already have:
+    attendance, workout, sleep (minutes >= target), steps (>= target), meals_logged,
+    calories_under (<= target), routine:<id> (that routine checked done). None = you tick it.
+    `target` is the threshold for data habits, or how many taps make a manual one done (water: 3 bottles)."""
+    __tablename__ = "habits"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    source: Mapped[str | None] = mapped_column(String(40))
+    target: Mapped[float | None] = mapped_column(Float)
+    days: Mapped[str] = mapped_column(String(7), default="MTWRFSU")   # which days it applies
+    per_week: Mapped[int | None] = mapped_column(Integer)             # e.g. gym 3x a week instead of daily
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class HabitLog(Base):
+    __tablename__ = "habit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    habit_id: Mapped[int] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"))
+    day: Mapped[datetime] = mapped_column(DateTime)       # midnight of the day
+    value: Mapped[float] = mapped_column(Float, default=0)
+    manual: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class HealthRecord(Base):
+    """Raw records from Health Connect (via the HC Webhook app), upserted by their Health Connect id."""
+    __tablename__ = "health_records"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rec_id: Mapped[str] = mapped_column(String(200), unique=True)
+    type: Mapped[str] = mapped_column(String(40))
+    start: Mapped[datetime] = mapped_column(DateTime)     # local time
+    end: Mapped[datetime | None] = mapped_column(DateTime)
+    value: Mapped[float | None] = mapped_column(Float)
+    data: Mapped[str] = mapped_column(Text, default="{}")
+
+
 class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)

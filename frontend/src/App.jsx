@@ -10,7 +10,7 @@ import TaskPanel from "./TaskPanel.jsx";
 import BlockPanel from "./BlockPanel.jsx";
 import Assistant from "./Assistant.jsx";
 
-const AREA_ICON = { career: "briefcase", fitness: "heart", finance: "wallet", personal: "today" };
+const AREA_ICON = { career: "briefcase", fitness: "heart", finance: "wallet", personal: "hand" };
 
 function parseRoute() {
   const h = window.location.hash.replace(/^#\/?/, "");
@@ -66,8 +66,12 @@ export default function App() {
       if (review) parts.push(`${review} to review`);
       if (r.google_tasks?.created) parts.push(`${r.google_tasks.created} from Google Tasks`);
       if (r.google === "not connected") parts.push("Google not connected");
+      if (r.moodle) {
+        if (r.moodle.error) parts.push(`Moodle failed (see Settings)`);
+        else parts.push(`Moodle: +${r.moodle.created}${r.moodle.suggested ? `, ${r.moodle.suggested} to review` : ""}${r.moodle.completed ? `, ${r.moodle.completed} done` : ""}`);
+      }
       if (failed.length) parts.push(`couldn't read ${failed.join(", ")} (see its course page)`);
-      notify(`Synced${parts.length ? ": " + parts.join(", ") : ". Everything's up to date"}`, failed.length ? "error" : "ok");
+      notify(`Synced${parts.length ? ": " + parts.join(", ") : ". Everything's up to date"}`, failed.length || r.moodle?.error ? "error" : "ok");
       setLastSync(new Date());
       refresh();
     } catch (e) {

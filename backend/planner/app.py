@@ -14,7 +14,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import areas as A
 from . import assistant
-from . import syllabus
+from . import habits as H
+from . import moodle, syllabus
 from . import grades, gsync, scrapers, service
 from .quickadd import repeat_label
 from .models import (AreaEntry, AttendanceLog, Block, Course, ExternalEvent, GradeCategory, GradeItem, Routine, Rule, Setting,
@@ -47,6 +48,16 @@ def parse_dt(v: str | None) -> datetime | None:
     return dt.replace(tzinfo=None, second=0, microsecond=0)
 
 
+def is_study(title: str) -> bool:
+    """Tests worth preparing for. Daily/reading quizzes are just tasks."""
+    import re as _re
+    low = title.lower()
+    if _re.search(r"\b(daily|reading|weekly|pre-?class|check-?in)\s+quiz", low):
+        return False
+    return low.startswith("study") or bool(_re.search(
+        r"\b(exam|quiz|midterm)\b|\bfinal\b(?!\s+(project|report|presentation|paper|demo|submission|draft|version))", low))
+
+
 def task_json(t: Task, rules) -> dict:
     return {
         "id": t.id, "title": t.title, "course": t.course, "due": iso(t.due),
@@ -59,7 +70,7 @@ def task_json(t: Task, rules) -> dict:
         "parent_id": t.parent_id, "position": t.position, "sequential": t.sequential,
         "course_id": t.course_id, "confidence": t.confidence, "max_per_day": t.max_per_day,
         "repeat": t.repeat, "repeat_label": repeat_label(t.repeat),
-        "is_study": t.title.lower().startswith("study") or any(w in t.title.lower() for w in ("exam", "quiz", "midterm", "final")),
+        "is_study": is_study(t.title),
     }
 
 
@@ -317,9 +328,11 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         t = g.db.get(Task, tid) or abort(404)
         data = request.get_json(force=True)
         old_due, old_status = t.due, t.status
+        import re as _re
         if "repeat" in data and data["repeat"] not in (None, "", "daily", "weekdays", "biweekly", "monthly") \
-                and not str(data["repeat"]).startswith("weekly"):
-            return jsonify(error="repeat must be daily, weekdays, weekly, biweekly or monthly"), 400
+                and not str(data["repeat"]).startswith("weekly") \
+                and not _re.fullmatch(r"days:M?T?W?R?F?S?U?", str(data["repeat"]) or "x"):
+            return jsonify(error="repeat must be daily, weekdays, weekly, biweekly, monthly or days:MTWRF"), 400
         if data.get("repeat") == "weekly":
             data["repeat"] = f"weekly:{t.due.weekday()}"
         apply_task_fields(t, data)
@@ -460,6 +473,16 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         scrape = request.args.get("scrape", "1") == "1"
         return jsonify(gsync.full_sync(g.db, scrape=scrape))
 
+    def personal_today(now) -> dict | None:
+        p = next((c for c in scrapers.get_courses(g.db) if c.kind == "personal"), None)
+        if p is None:
+            return None
+        s = A.summary(g.db, p, now)
+        soon = (now + timedelta(days=7)).isoformat()
+        return {"area_id": p.id, "pinned": [m for m in s["memos"] if m["data"].get("pinned")][:6],
+                "promises": [x for x in s["promises_open"] if not x["date"] or x["date"] <= soon][:6],
+                "word": s["word"], "owed_to_me": s["owed_to_me"], "i_owe": s["i_owe"]}
+
     def attendance_prompts(now) -> list[dict]:
         """Courses that track attendance and met today (class time has started)."""
         code = "MTWRFSU"[now.weekday()]
@@ -489,7 +512,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         return jsonify(now=iso(now), blocks=blocks_json(g.db, blocks),
                        events=[{"id": e.id, "title": e.title, "start": iso(e.start), "end": iso(e.end)} for e in events],
                        remaining_task_minutes=remaining, needs_checkin=needs_checkin,
-                       attendance=attendance_prompts(now),
+                       attendance=attendance_prompts(now), personal=personal_today(now),
                        due_soon=[task_tree_json(g.db, t, rules()) for t in g.db.scalars(
                            select(Task).where(Task.status == "open", Task.parent_id.is_(None),
                                               Task.due < now + timedelta(days=7)).order_by(Task.due).limit(12))],
@@ -750,6 +773,150 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         g.db.expire(cat)
         return jsonify(grade_summary(g.db.get(Course, cat.course_id)))
 
+    # ---- Habits -------------------------------------------------------------------------------
+
+    HABIT_FIELDS = {"name", "source", "target", "days", "per_week", "position", "active"}
+
+    def clean_habit(d: dict) -> dict:
+        out = {k: d[k] for k in HABIT_FIELDS & d.keys()}
+        src = out.get("source")
+        if src in ("", "none"):
+            out["source"] = None
+        elif src is not None and src not in H.SOURCES and not str(src).startswith("routine:"):
+            raise ValueError("unknown source")
+        for k in ("target",):
+            if k in out:
+                out[k] = None if out[k] in (None, "") else float(out[k])
+        if "per_week" in out:
+            out["per_week"] = None if out["per_week"] in (None, "", 0) else int(out["per_week"])
+        if "days" in out:
+            out["days"] = "".join(c for c in "MTWRFSU" if c in (out["days"] or "")) or "MTWRFSU"
+        return out
+
+    @app.get("/api/habits")
+    @token_or_login
+    def list_habits():
+        today = service.local_now(g.db).date()
+        return jsonify(habits=H.summary(g.db, today, int(request.args.get("days", 28))),
+                       sources={k or "": v for k, v in H.SOURCES.items()}, suggested=H.SUGGESTED)
+
+    @app.post("/api/habits")
+    @login_required
+    def create_habit():
+        from .models import Habit
+        try:
+            d = clean_habit(request.get_json(force=True))
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if not (d.get("name") or "").strip():
+            return jsonify(error="a habit needs a name"), 400
+        n = len(g.db.scalars(select(Habit)).all())
+        g.db.add(Habit(position=n, **d))
+        g.db.commit()
+        return list_habits(), 201
+
+    @app.post("/api/habits/suggested")
+    @login_required
+    def add_suggested_habits():
+        from .models import Habit
+        have = {h.name for h in g.db.scalars(select(Habit))}
+        wanted = request.get_json(silent=True) or {}
+        names = set(wanted.get("names") or [s["name"] for s in H.SUGGESTED])
+        n = len(have)
+        for sdef in H.SUGGESTED:
+            if sdef["name"] in names and sdef["name"] not in have:
+                g.db.add(Habit(position=n, **sdef))
+                n += 1
+        g.db.commit()
+        return list_habits()
+
+    @app.patch("/api/habits/<int:hid>")
+    @login_required
+    def update_habit(hid):
+        from .models import Habit
+        h = g.db.get(Habit, hid) or abort(404)
+        try:
+            for k, v in clean_habit(request.get_json(force=True)).items():
+                setattr(h, k, v)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        g.db.commit()
+        return list_habits()
+
+    @app.delete("/api/habits/<int:hid>")
+    @login_required
+    def delete_habit(hid):
+        from .models import Habit, HabitLog
+        h = g.db.get(Habit, hid) or abort(404)
+        for l in g.db.scalars(select(HabitLog).where(HabitLog.habit_id == hid)):
+            g.db.delete(l)
+        g.db.delete(h)
+        g.db.commit()
+        return list_habits()
+
+    @app.post("/api/habits/<int:hid>/tap")
+    @token_or_login
+    def tap_habit(hid):
+        """{} ticks today; {"delta": -1} un-ticks; {"day": "2026-10-28"} for another day; {"value": 2} sets it."""
+        from .models import Habit
+        h = g.db.get(Habit, hid) or abort(404)
+        d = request.get_json(silent=True) or {}
+        day = parse_dt(d.get("day")) or service.local_now(g.db)
+        H.tap(g.db, h, day.date(), d.get("delta"), d.get("value"))
+        return list_habits()
+
+    # ---- Moodle -------------------------------------------------------------------------------
+
+    @app.get("/api/moodle")
+    @login_required
+    def moodle_get():
+        cfg = moodle.config(g.db)
+        courses = list(g.db.scalars(select(Course)))
+        seen = []
+        for mc in cfg["seen"]:
+            mapped = cfg["map"].get(mc["name"])
+            guess = moodle.guess_course(mc["name"], courses)
+            seen.append({**mc, "mapped": mapped, "guess": guess.id if guess else None})
+        tok = cfg["token"]
+        return jsonify(ical_url=cfg["ical_url"], base_url=cfg["base_url"], has_token=bool(tok),
+                       token_hint=("…" + tok[-4:]) if tok else "", seen=seen, last=cfg["last"])
+
+    @app.put("/api/moodle")
+    @login_required
+    def moodle_put():
+        d = request.get_json(force=True)
+        for key, field in (("moodle_ical", "ical_url"), ("moodle_url", "base_url"), ("moodle_token", "token")):
+            if field in d:
+                v = (d[field] or "").strip()
+                if v and field != "token" and not v.startswith(("http://", "https://", "webcal://")):
+                    return jsonify(error=f"{field.replace('_', ' ')} must be a web address"), 400
+                if field == "token":
+                    v = moodle.clean_token(v)
+                service.set_setting(g.db, key, v.replace("webcal://", "https://", 1))
+        if "map" in d:
+            cur = moodle.config(g.db)["map"]
+            for name, cid in d["map"].items():
+                if cid in (None, ""):
+                    cur.pop(name, None)
+                else:
+                    cur[name] = cid
+            service.set_setting(g.db, "moodle_map", json.dumps(cur))
+        g.db.commit()
+        return moodle_get()
+
+    @app.post("/api/moodle/sync")
+    @login_required
+    def moodle_sync():
+        r = moodle.sync(g.db, service.local_now(g.db))
+        service.replan(g.db)
+        return jsonify(r)
+
+    @app.get("/api/courses/<int:cid>/moodle-grades")
+    @login_required
+    def moodle_grades(cid):
+        row = g.db.get(Setting, f"moodle_grades:{cid}")
+        return jsonify(json.loads(row.value) if row else [])
+
     # ---- Syllabus and attendance --------------------------------------------------------------
 
     @app.post("/api/courses/<int:cid>/syllabus/read")
@@ -914,12 +1081,34 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         if fitness is None:
             return jsonify(error="no Fitness area"), 400
         day = parse_dt(d.get("date")) or service.local_now(g.db)
-        data = {k: d[k] for k in ("sleep_minutes", "steps", "weight", "resting_hr") if k in d}
+        data = {k: d[k] for k in ("sleep_minutes", "steps", "weight", "resting_hr", "avg_hr") if k in d}
         try:
             e = A.add_entry(g.db, fitness, "metric", day, data)
         except ValueError as err:
             return jsonify(error=str(err)), 400
         return jsonify(A.entry_json(e))
+
+    @app.post("/api/health/connect")
+    @token_or_login
+    def health_connect():
+        """Webhook for the Android "HC Webhook" app (Health Connect). Set its URL to this and add the
+        header  Authorization: Bearer <your key>."""
+        from zoneinfo import ZoneInfo
+        from . import health
+        payload = request.get_json(force=True, silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="expected a JSON object"), 400
+        tz = ZoneInfo(service.get_settings(g.db)["timezone"])
+        result = health.ingest(g.db, payload, tz)
+        service.set_setting(g.db, "health_last", json.dumps({**result, "at": iso(service.local_now(g.db))}))
+        g.db.commit()
+        return jsonify(ok=True, **result)
+
+    @app.get("/api/health/status")
+    @login_required
+    def health_status():
+        row = g.db.get(Setting, "health_last")
+        return jsonify(json.loads(row.value) if row else {})
 
     @app.get("/api/token")
     @login_required

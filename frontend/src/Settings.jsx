@@ -53,6 +53,8 @@ export default function Settings({ ctx }) {
         </div>
       </div>
 
+      <MoodleCard ctx={ctx} />
+
       <PhoneAndExtension ctx={ctx} />
 
       <div className="set-card">
@@ -143,16 +145,109 @@ function PhoneAndExtension({ ctx }) {
         <button className="btn sm" onClick={rotate}>{tok ? "Make a new key" : "Create key"}</button>
       </div>
       <details className="adv">
-        <summary>Send sleep and steps from your phone</summary>
+        <summary>Send sleep, steps and heart rate from your phone</summary>
         <div className="small stack" style={{ gap: 6 }}>
+          <HealthStatus />
           <div><b>iPhone (Shortcuts app):</b> New personal automation → Time of Day 9:00 AM daily → actions: <i>Find Health Samples</i> (Sleep, last night) and <i>Find Health Samples</i> (Steps, yesterday) → <i>Get Contents of URL</i>:</div>
           <code style={{ whiteSpace: "pre-wrap", display: "block", padding: 8 }}>{`POST ${origin}/api/health/ingest
 Header  Authorization: Bearer <your key>
 JSON    {"date": "<yesterday>", "sleep_minutes": <sleep total>, "steps": <steps total>}`}</code>
-          <div><b>Android:</b> GloryFit writes to Health Connect. Any "Health Connect to webhook" exporter can POST the same JSON on a schedule.</div>
+          <div><b>Android (Health Connect, recommended):</b></div>
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            <li>In GloryFit, turn on syncing to <i>Health Connect</i> (sleep, steps, heart rate).</li>
+            <li>Install <b>HC Webhook</b> (Play Store: "Health Connect Webhook", package com.hcwebhook.app) and allow it to read Steps, Sleep, Heart rate, Resting heart rate, Exercise and Weight.</li>
+            <li>Add a webhook: URL <code>{origin}/api/health/connect</code>, format JSON, and a custom header <code>Authorization</code> = <code>Bearer &lt;your key&gt;</code>.</li>
+            <li>Set it to sync every hour (or at least every morning), then tap <i>Test</i>.</li>
+          </ol>
+          <div className="faint">Sleep shows on the day you wake up; workouts from the watch appear on the Fitness page and tick your Gym habit.</div>
           <div className="faint">Either way the numbers show up on the Fitness page.</div>
         </div>
       </details>
     </div>
   );
+}
+
+function MoodleCard({ ctx }) {
+  const [m, setM] = useState(null);
+  const [f, setF] = useState({ ical_url: "", base_url: "", token: "" });
+  const [busy, setBusy] = useState(false);
+  const load = () => api.get("/api/moodle").then((d) => { setM(d); setF({ ical_url: d.ical_url, base_url: d.base_url, token: "" }); }).catch(() => {});
+  useEffect(() => { load(); }, [ctx.version]);
+  if (!m) return null;
+  async function save() {
+    try {
+      const body = { ical_url: f.ical_url, base_url: f.base_url, ...(f.token ? { token: f.token } : {}) };
+      setM(await api.put("/api/moodle", body)); setF({ ...f, token: "" }); ctx.notify("Saved");
+    } catch (e) { ctx.notify(e.message, "error"); }
+  }
+  async function sync() {
+    setBusy(true);
+    try {
+      const r = await api.post("/api/moodle/sync");
+      ctx.notify(r.error ? `Moodle: ${r.error}` : `Moodle (${r.via}): found ${r.found}, added ${r.created}` +
+        `${r.suggested ? `, ${r.suggested} need a course (below)` : ""}${r.completed ? `, ${r.completed} marked done` : ""}${r.grades_filled ? `, ${r.grades_filled} grades filled` : ""}`, r.error ? "error" : "ok");
+      load(); ctx.refresh();
+    } catch (e) { ctx.notify(e.message, "error"); }
+    setBusy(false);
+  }
+  async function mapTo(name, value) {
+    try { setM(await api.put("/api/moodle", { map: { [name]: value === "" ? null : value === "ignore" ? "ignore" : Number(value) } })); ctx.notify("Saved. Sync to apply"); }
+    catch (e) { ctx.notify(e.message, "error"); }
+  }
+  const courses = ctx.courses.filter((c) => c.kind === "course");
+  const last = m.last || {};
+  return (
+    <div className="set-card">
+      <h3>Moodle</h3>
+      <p className="muted small" style={{ margin: 0 }}>Brings every Moodle assignment and quiz into your plan on each Sync. Use either one; the key gets more (quizzes not on the calendar, grades, and it marks things done when Moodle shows them submitted).</p>
+      <label className="field">Calendar link <span className="faint">Moodle → Calendar → Export calendar → All courses, Recent and next 60 days → Get calendar URL</span>
+        <input value={f.ical_url} onChange={(e) => setF({ ...f, ical_url: e.target.value })} placeholder="https://moodle.rose-hulman.edu/calendar/export_execute.php?userid=…&authtoken=…" />
+      </label>
+      <div className="row">
+        <label className="field grow">Moodle site<input value={f.base_url} onChange={(e) => setF({ ...f, base_url: e.target.value })} placeholder="https://moodle.rose-hulman.edu" /></label>
+        <label className="field grow">Web service key {m.has_token && <span className="faint">(saved {m.token_hint})</span>}
+          <input type="password" value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} placeholder={m.has_token ? "leave empty to keep" : "optional"} /></label>
+      </div>
+      <details className="adv">
+        <summary>How to get a web service key</summary>
+        <div className="small stack" style={{ gap: 6 }}>
+          <div><b>Try first:</b> Moodle → your name → Preferences → <i>Security keys</i>. If there's a key for "Moodle mobile web service", copy it.</div>
+          <div><b>If that page doesn't exist</b> (school sign-in sites often hide it): while logged in to Moodle, open
+            <code style={{ display: "block", margin: "4px 0", whiteSpace: "pre-wrap" }}>{(f.base_url || "https://moodle.rose-hulman.edu") + "/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345&urlscheme=moodlemobile"}</code>
+            The browser will try to open a "moodlemobile://token=…" link and fail. Press F12 → Network, find that request, and copy the part after <code>token=</code>. Paste it here as is; the planner decodes it.</div>
+          <div className="faint">If the site has the mobile app turned off, use the calendar link instead.</div>
+        </div>
+      </details>
+      <div className="row">
+        <button className="btn" onClick={save}>Save</button>
+        <button className="btn primary" onClick={sync} disabled={busy}>{busy ? "Syncing…" : "Sync Moodle now"}</button>
+        {last.at && <span className={`small ${last.error ? "err" : "muted"}`}>Last: {last.error ? last.error : `${last.via}, ${last.found} items`} · {new Date(last.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>}
+      </div>
+      {m.seen.length > 0 && (
+        <div>
+          <div className="subhead" style={{ marginTop: 6 }}>Which course is which</div>
+          {m.seen.map((s) => {
+            const value = s.mapped ?? (s.guess ? String(s.guess) : "");
+            return (
+              <div key={s.name} className="row between" style={{ padding: "4px 0", borderBottom: "1px solid var(--line)" }}>
+                <span className="ellipsis" style={{ maxWidth: 380 }}>{s.name}{s.fullname && s.fullname !== s.name ? <span className="faint"> · {s.fullname}</span> : null}</span>
+                <select value={String(value)} onChange={(e) => mapTo(s.name, e.target.value)}>
+                  <option value="">Not set{s.guess ? "" : " (items wait in Tasks for review)"}</option>
+                  {courses.map((c) => <option key={c.id} value={String(c.id)}>{c.name}{!s.mapped && s.guess === c.id ? " (guessed)" : ""}</option>)}
+                  <option value="ignore">Ignore this course</option>
+                </select>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HealthStatus() {
+  const [h, setH] = useState(null);
+  useEffect(() => { api.get("/api/health/status").then(setH).catch(() => {}); }, []);
+  if (!h || !h.at) return <div className="faint">Nothing received from your phone yet.</div>;
+  return <div className="muted">Last received {new Date(h.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}: {Object.entries(h.received || {}).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ") || "no new records"}.</div>;
 }

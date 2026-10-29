@@ -345,3 +345,145 @@ export function FinanceModule({ area, ctx }) {
     </div>
   );
 }
+
+/* ---------------- Personal: promises, money between people, things to remember ---------------- */
+export function PersonalModule({ area, ctx, tab }) {
+  const [s, reload] = useSummary(area, ctx);
+  const act = useEntryActions(area, ctx, reload);
+  const [pr, setPr] = useState({ text: "", to: "", by: "" });
+  const [io, setIo] = useState({ person: "", amount: "", direction: "they_owe", note: "", by: "" });
+  const [memo, setMemo] = useState("");
+  const [showSettled, setShowSettled] = useState(false);
+  if (!s) return <div className="muted">Loading…</div>;
+  const pct = s.word.total ? Math.round((100 * s.word.kept) / s.word.total) : null;
+
+  if (tab === "promises") return (
+    <div className="stack" style={{ gap: 18 }}>
+      <div className="grade-cards">
+        <div className="grade-card"><div className="lbl">Word kept (last 60 days)</div>
+          <div className="big">{pct == null ? "—" : `${pct}%`}</div>
+          <div className="lbl">{s.word.total ? `${s.word.kept} of ${s.word.total} promises kept` : "mark promises kept or broken to see this"}</div></div>
+        <div className="grade-card"><div className="lbl">Open promises</div><div className="big">{s.promises_open.length}</div>
+          <div className="lbl">ones with a date are on your plan</div></div>
+        <div className="grade-card"><div className="lbl">Due this week</div>
+          <div className="big">{s.promises_open.filter((p) => p.date && new Date(p.date) - new Date() < 7 * 86400000).length}</div>
+          <div className="lbl">see Today</div></div>
+      </div>
+      <form className="box pad stack" style={{ gap: 8 }} onSubmit={async (e) => {
+        e.preventDefault();
+        if (!pr.text) return;
+        if (await act.add("promise", { text: pr.text, to: pr.to || "myself", status: "open" }, pr.by || null, pr.by ? "Promise made. It's on your plan" : "Promise made")) setPr({ text: "", to: "", by: "" });
+      }}>
+        <b>Make a promise</b>
+        <div className="row">
+          <input value={pr.text} onChange={(e) => setPr({ ...pr, text: e.target.value })} placeholder="What you're committing to" className="grow" />
+          <input value={pr.to} onChange={(e) => setPr({ ...pr, to: e.target.value })} placeholder="To whom (blank = myself)" style={{ width: 180 }} />
+          <input type="datetime-local" value={pr.by} onChange={(e) => setPr({ ...pr, by: e.target.value })} aria-label="By when" />
+          <button className="btn primary">Promise</button>
+        </div>
+        <div className="hint">Keep them small enough that you'll keep them. Mark each one kept or broken, honestly; that's the score above.</div>
+      </form>
+      <div className="mini-list">
+        {s.promises_open.length === 0 && <div className="faint small">No open promises.</div>}
+        {s.promises_open.map((p) => (
+          <div key={p.id} className="mini" style={{ alignItems: "center" }}>
+            <span className="grow"><b style={{ fontWeight: 500 }}>{p.data.text}</b>
+              <span className="muted small">{p.data.to && p.data.to !== "myself" ? ` · to ${p.data.to}` : " · to myself"}{p.date ? ` · by ${fmtDue(p.date)}` : ""}</span></span>
+            <button className="btn ok sm" onClick={() => act.patch(p.id, { data: { status: "kept" } }, "Kept. That counts")}>Kept</button>
+            <button className="btn sm" onClick={() => act.patch(p.id, { data: { status: "broken" } }, "Logged as broken")}>Broken</button>
+            <button className="icon-btn" onClick={() => act.del(p.id)} aria-label="Remove"><Icon name="x" size={12} /></button>
+          </div>
+        ))}
+      </div>
+      {s.promises_closed.length > 0 && (
+        <div>
+          <div className="section-title">Recent</div>
+          <div className="mini-list">
+            {s.promises_closed.slice(0, 12).map((p) => (
+              <div key={p.id} className="mini"><span className="grow ellipsis">{p.data.text}</span>
+                <span className={`tag ${p.data.status === "kept" ? "ok" : "danger"}`}>{p.data.status}</span></div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  if (tab === "money") return (
+    <div className="stack" style={{ gap: 18 }}>
+      <div className="grade-cards">
+        <div className="grade-card"><div className="lbl">Owed to you</div><div className="big">{money(s.owed_to_me)}</div><div className="lbl">across everyone</div></div>
+        <div className="grade-card"><div className="lbl">You owe</div><div className="big">{money(s.i_owe)}</div><div className="lbl">dated ones become "Pay back" tasks</div></div>
+        <div className="grade-card"><div className="lbl">People</div>
+          <div className="stack" style={{ gap: 2, marginTop: 4 }}>
+            {s.balances.length === 0 && <span className="lbl">All square.</span>}
+            {s.balances.slice(0, 5).map((b) => (
+              <div key={b.person} className="row between small"><span>{b.person}</span>
+                <span className={b.net > 0 ? "" : "err"}>{b.net > 0 ? `owes you ${money(b.net)}` : `you owe ${money(-b.net)}`}</span></div>
+            ))}
+          </div></div>
+      </div>
+      <form className="box pad stack" style={{ gap: 8 }} onSubmit={async (e) => {
+        e.preventDefault();
+        if (!io.person || !io.amount) return;
+        const { by, ...data } = io;
+        if (await act.add("iou", data, by || null, "Logged")) setIo({ person: "", amount: "", direction: io.direction, note: "", by: "" });
+      }}>
+        <b>Log money</b>
+        <div className="row">
+          <input value={io.person} onChange={(e) => setIo({ ...io, person: e.target.value })} placeholder="Who" style={{ width: 150 }} />
+          <select value={io.direction} onChange={(e) => setIo({ ...io, direction: e.target.value })}>
+            <option value="they_owe">owes me</option><option value="i_owe">I owe them</option>
+          </select>
+          <input type="number" step="0.01" value={io.amount} onChange={(e) => setIo({ ...io, amount: e.target.value })} placeholder="$" style={{ width: 90 }} />
+          <input value={io.note} onChange={(e) => setIo({ ...io, note: e.target.value })} placeholder="For what" className="grow" />
+          <input type="datetime-local" value={io.by} onChange={(e) => setIo({ ...io, by: e.target.value })} aria-label="Settle by (optional)" title="Optional: settle by" />
+          <button className="btn primary">Log</button>
+        </div>
+      </form>
+      <div className="table-wrap">
+        <table className="grid">
+          <thead><tr><th>Who</th><th>Direction</th><th className="num">Amount</th><th>For</th><th>By</th><th style={{ width: 90 }} /></tr></thead>
+          <tbody>
+            {s.ious.length === 0 && <tr><td colSpan={6} className="faint">Nothing open.</td></tr>}
+            {s.ious.map((x) => (
+              <tr key={x.id}>
+                <td>{x.data.person}</td>
+                <td className={x.data.direction === "i_owe" ? "err" : ""}>{x.data.direction === "i_owe" ? "you owe" : "owes you"}</td>
+                <td className="num">{money(x.data.amount)}</td>
+                <td className="muted">{x.data.note}</td>
+                <td className="muted small">{x.date ? fmtDue(x.date) : ""}</td>
+                <td><button className="btn ok sm" onClick={() => act.patch(x.id, { data: { settled: true } }, "Settled")}>Settled</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {s.settled.length > 0 && <button className="linkish small" onClick={() => setShowSettled(!showSettled)}>{showSettled ? "Hide" : "Show"} settled ({s.settled.length})</button>}
+      {showSettled && <div className="mini-list">{s.settled.map((x) => (
+        <div key={x.id} className="mini"><span className="grow faint">{x.data.person}: {money(x.data.amount)} {x.data.note ? `· ${x.data.note}` : ""}</span>
+          <button className="icon-btn" onClick={() => act.del(x.id)} aria-label="Delete"><Icon name="x" size={12} /></button></div>))}</div>}
+    </div>
+  );
+
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <form className="row" onSubmit={async (e) => { e.preventDefault(); if (memo.trim() && await act.add("memo", { text: memo.trim(), pinned: true }, null, "Pinned to Today")) setMemo(""); }}>
+        <input value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="Something important to remember…" className="grow" />
+        <button className="btn primary">Save</button>
+      </form>
+      <div className="hint" style={{ marginTop: -6 }}>Pinned items show on your Today page. Unpin the ones you only need to look up.</div>
+      <div className="mini-list">
+        {s.memos.length === 0 && <div className="faint small">Nothing saved yet.</div>}
+        {s.memos.map((m) => (
+          <div key={m.id} className="mini" style={{ alignItems: "center" }}>
+            <span className="grow" style={{ whiteSpace: "pre-wrap" }}>{m.data.text}</span>
+            <button className={`btn sm ${m.data.pinned ? "" : "quiet"}`} onClick={() => act.patch(m.id, { data: { pinned: !m.data.pinned } })}>
+              <Icon name="pin" size={12} />{m.data.pinned ? "Pinned" : "Pin"}</button>
+            <button className="icon-btn" onClick={() => act.del(m.id)} aria-label="Delete"><Icon name="x" size={12} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

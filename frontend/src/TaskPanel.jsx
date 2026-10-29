@@ -86,10 +86,21 @@ export default function TaskPanel({ id, ctx, onClose }) {
         {!t.parent_id && <>
           <div className="k">Repeats</div>
           <div className="v">
-            <select value={t.repeat ? (t.repeat.startsWith("weekly") ? "weekly" : t.repeat) : ""} onChange={(e) => save({ repeat: e.target.value || null })}>
+            <select value={t.repeat ? (t.repeat.startsWith("weekly") ? "weekly" : t.repeat.startsWith("days:") ? "days" : t.repeat) : ""}
+                    onChange={(e) => save({ repeat: e.target.value === "days" ? `days:${"MTWRFSU"[(new Date(t.due).getDay() + 6) % 7]}` : e.target.value || null })}>
               <option value="">Doesn't repeat</option><option value="daily">Every day</option><option value="weekdays">Every weekday</option>
+              <option value="days">On certain days…</option>
               <option value="weekly">Every week</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Every month</option>
             </select>
+            {t.repeat?.startsWith("days:") && (
+              <span className="days">
+                {[["M", "Mon"], ["T", "Tue"], ["W", "Wed"], ["R", "Thu"], ["F", "Fri"], ["S", "Sat"], ["U", "Sun"]].map(([d, l]) => {
+                  const on = t.repeat.slice(5).includes(d);
+                  const next = "MTWRFSU".split("").filter((x) => (x === d ? !on : t.repeat.slice(5).includes(x))).join("");
+                  return <button type="button" key={d} title={l} className={`day ${on ? "on" : ""}`} onClick={() => next && save({ repeat: `days:${next}` })}>{l[0]}</button>;
+                })}
+              </span>
+            )}
             {t.repeat && <span className="faint small">next one appears when you finish this</span>}
           </div>
         </>}

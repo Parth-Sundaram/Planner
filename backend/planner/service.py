@@ -88,10 +88,35 @@ def task_effective_due(task: Task, rules: list[dict]) -> datetime:
     return S.effective_due(task.due, task.tag_list, rules)
 
 
+def materialize_repeats(db: Session, until: datetime) -> int:
+    """Repeating tasks: make sure every occurrence inside the planning window exists, so a
+    daily quiz shows up every day even if yesterday's wasn't ticked off."""
+    from .quickadd import next_due
+    made = 0
+    latest: dict[int, Task] = {}
+    for t in db.scalars(select(Task).where(Task.repeat.is_not(None), Task.parent_id.is_(None))):
+        sid = t.series_id or t.id
+        if sid not in latest or t.due > latest[sid].due:
+            latest[sid] = t
+    for sid, t in latest.items():
+        if t.status not in ("open", "done"):
+            continue
+        guard = 0
+        while (nd := next_due(t.due, t.repeat)) <= until and guard < 60:
+            nxt = spawn_next(db, t)
+            guard += 1
+            if nxt is None:
+                break
+            db.flush()
+            t, made = nxt, made + 1
+    return made
+
+
 def replan(db: Session, now: datetime | None = None) -> dict:
     now = now or local_now(db)
     cfg = get_settings(db)
     horizon_end = datetime.combine(now.date() + timedelta(days=int(cfg["horizon_days"])), time.min)
+    materialize_repeats(db, horizon_end)
 
     # 1. Throw away future planned blocks that the user hasn't touched; they get regenerated.
     db.execute(delete(Block).where(
@@ -232,7 +257,8 @@ def spawn_next(db: Session, t: Task) -> Task | None:
     nxt = Task(title=t.title, course=t.course, course_id=t.course_id, due=due, est_minutes=t.est_minutes,
                priority=t.priority, splittable=t.splittable, min_block=t.min_block, max_block=t.max_block,
                tags=t.tags, notes=t.notes, repeat=t.repeat, series_id=series, external_id=ext,
-               source=t.source if t.source == "manual" else "manual", needs_estimate=False)
+               source=t.source if t.source == "manual" else "manual", needs_estimate=False,
+               earliest_start=(t.earliest_start + (due - t.due)) if t.earliest_start else None)
     if t.series_id is None:
         t.series_id = series
     db.add(nxt)

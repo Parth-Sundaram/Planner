@@ -76,3 +76,19 @@ def test_timesheet_end_to_end(monkeypatch):
     # Explicit metadata and fields still win
     r = c.post("/api/tasks", json={"text": "timesheet ~30m by Sunday", "due": "2026-10-24T12:00"}).get_json()
     assert (r["task"]["est_minutes"], r["task"]["due"]) == (30, "2026-10-24T12:00")
+
+
+def test_custom_day_repeats_and_materialize(monkeypatch):
+    d, r, t = Q.parse_when("DB daily quiz every Mon, Tue, Thu and Fri at 11:59pm", NOW)
+    assert (r, t, d) == ("days:MTRF", "DB daily quiz", datetime(2026, 10, 20, 23, 59))  # Tue 7pm: tonight's counts
+    assert Q.repeat_label("days:MTRF") == "every Mon, Tue, Thu, Fri"
+    assert Q.next_due(datetime(2026, 10, 23, 23, 59), "days:MTRF") == datetime(2026, 10, 26, 23, 59)  # Fri -> Mon
+    from planner import service
+    monkeypatch.setattr(service, "local_now", lambda db: NOW)
+    c = create_app("sqlite://", testing=True).test_client()
+    c.post("/auth/dev-login")
+    c.post("/api/tasks", json={"text": "DB daily quiz every Mon Tue Thu Fri at 11:59pm ~30m"})
+    quizzes = sorted(x["due"] for x in c.get("/api/tasks").get_json() if x["title"] == "DB daily quiz")
+    # tonight through the 2-week window (ends Nov 3), skipping Wednesdays and weekends
+    assert quizzes == ["2026-10-20T23:59", "2026-10-22T23:59", "2026-10-23T23:59", "2026-10-26T23:59", "2026-10-27T23:59",
+                       "2026-10-29T23:59", "2026-10-30T23:59", "2026-11-02T23:59"]

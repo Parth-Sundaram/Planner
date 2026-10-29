@@ -326,6 +326,9 @@ def full_sync(db: Session, now: datetime | None = None, services=None, scrape=Tr
         report["google_tasks"] = import_google_tasks(db, tasks_api, now)
     if scrape:
         report["courses"] = scrapers.sync_courses(db, now)
+        from . import moodle
+        if moodle.configured(db):
+            report["moodle"] = moodle.sync(db, now)
     report["plan"] = service.replan(db, now)
     if cal:
         report["pushed"] = push_plan(db, cal, now)

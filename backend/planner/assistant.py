@@ -13,6 +13,8 @@ import os
 from datetime import datetime, timedelta
 
 import requests
+
+from . import gemini
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -44,6 +46,25 @@ TOOLS = [
     {"name": "update_routine", "description": "Change a weekly routine: days (subset of MTWRFSU), window, length, or turn it off.",
      "parameters": {"type": "OBJECT", "properties": {"routine_id": I, "days": S, "window_start": S, "window_end": S,
                                                      "duration": I, "active": B}, "required": ["routine_id"]}},
+    {"name": "log_money", "description": "Record money owed between the user and someone else.",
+     "parameters": {"type": "OBJECT", "properties": {
+         "person": S, "amount": {"type": "NUMBER"},
+         "direction": {**S, "description": "they_owe (they owe the user) | i_owe (the user owes them)"},
+         "note": S, "due": {**S, "description": "optional YYYY-MM-DDTHH:MM to pay or collect by"}},
+         "required": ["person", "amount", "direction"]}},
+    {"name": "settle_money", "description": "Mark a money entry (id from MONEY in the snapshot) as paid back.",
+     "parameters": {"type": "OBJECT", "properties": {"entry_id": I}, "required": ["entry_id"]}},
+    {"name": "make_promise", "description": "Record a promise the user made (to someone or to themselves). With a date it becomes a task.",
+     "parameters": {"type": "OBJECT", "properties": {"text": S, "to": {**S, "description": "person, or 'myself'"},
+                                                     "by": S, "minutes": I}, "required": ["text"]}},
+    {"name": "close_promise", "description": "Mark a promise (id from PROMISES in the snapshot) as kept or broken.",
+     "parameters": {"type": "OBJECT", "properties": {"entry_id": I, "status": {**S, "description": "kept | broken"}},
+                    "required": ["entry_id", "status"]}},
+    {"name": "pin_memo", "description": "Save something the user needs to remember (shown on their Today page if pinned).",
+     "parameters": {"type": "OBJECT", "properties": {"text": S, "pinned": B}, "required": ["text"]}},
+    {"name": "tick_habit", "description": "Mark a habit (id from HABITS) done today, or add to a counted habit like water.",
+     "parameters": {"type": "OBJECT", "properties": {"habit_id": I, "amount": {"type": "NUMBER", "description": "for counted habits; default 1"}},
+                    "required": ["habit_id"]}},
     {"name": "remember", "description": "Save a durable fact about how the user works or what they prefer, for future planning.",
      "parameters": {"type": "OBJECT", "properties": {"note": S}, "required": ["note"]}},
     {"name": "forget", "description": "Delete a saved note that is wrong or outdated.",
@@ -101,6 +122,29 @@ def snapshot(db: Session, now: datetime) -> str:
     plan = json.loads(service.get_settings(db).get("last_plan") or "{}")
     if plan.get("warnings"):
         lines.append("PLANNER WARNINGS: " + " / ".join(w["message"] for w in plan["warnings"][:8]))
+    personal = next((a for a in areas if a.kind == "personal"), None)
+    if personal:
+        from .areas import summary as area_summary
+        ps = area_summary(db, personal, now)
+        if ps["ious"]:
+            lines.append("MONEY (id | person | amount | who owes | note):")
+            lines += [f"  e{x['id']} | {x['data'].get('person')} | ${x['data'].get('amount', 0):.2f} | "
+                      f"{'they owe user' if x['data'].get('direction', 'they_owe') == 'they_owe' else 'user owes them'} | "
+                      f"{x['data'].get('note', '')}" for x in ps["ious"][:20]]
+        if ps["promises_open"]:
+            lines.append("PROMISES (id | by | promise | to):")
+            lines += [f"  e{x['id']} | {(x['date'] or '-').replace('T', ' ')} | {x['data'].get('text')} | {x['data'].get('to', '-')}"
+                      for x in ps["promises_open"][:20]]
+        pinned = [m for m in ps["memos"] if m["data"].get("pinned")]
+        if pinned:
+            lines.append("PINNED REMINDERS: " + " / ".join(m["data"]["text"] for m in pinned[:10]))
+    from . import habits as HB
+    hs = [h for h in HB.summary(db, now.date(), days=7) if h["today"]["applies"]]
+    if hs:
+        lines.append("HABITS TODAY (id | habit | done | streak):")
+        lines += [f"  h{h['id']} | {h['name']} | {'yes' if h['today']['done'] else 'no'}"
+                  f"{' (' + str(h['today']['value']) + '/' + str(h['target']) + ')' if h['target'] and not h['source'] else ''} | {h['streak_label']}"
+                  for h in hs]
     notes = list(db.scalars(select(AssistantNote).order_by(AssistantNote.id)))
     if notes:
         lines.append("NOTES YOU SAVED EARLIER (id: note):")
@@ -112,11 +156,11 @@ def _call(contents: list, system: str) -> dict:
     key = os.getenv("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("The assistant needs GEMINI_API_KEY (free, from Google AI Studio) set in Render.")
-    model = os.getenv("GEMINI_ASSISTANT_MODEL", "gemini-2.5-flash-lite")
+    model = os.getenv("GEMINI_ASSISTANT_MODEL", "gemini-3.5-flash-lite")
     gen = {"temperature": 0.3}
     if "2.5" in model:
         gen["thinkingConfig"] = {"thinkingBudget": 0}  # fastest replies; the snapshot does the heavy lifting
-    r = requests.post(GEMINI_URL.format(model=model), headers={"x-goog-api-key": key}, timeout=45, json={
+    r = gemini.post(model, key, timeout=45, json={
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
         "tools": [{"functionDeclarations": TOOLS}],
@@ -131,7 +175,7 @@ def _call(contents: list, system: str) -> dict:
 
 
 def _ids(v) -> int:
-    return int(str(v).lstrip("tbrn"))
+    return int(str(v).lstrip("tbrneh"))
 
 
 def describe(db: Session, name: str, args: dict) -> str:
@@ -160,6 +204,23 @@ def describe(db: Session, name: str, args: dict) -> str:
         r = db.get(Routine, _ids(args.get("routine_id", 0)))
         changes = ", ".join(f"{k.replace('_', ' ')} → {v}" for k, v in args.items() if k != "routine_id")
         return f"Change routine {r.title if r else args.get('routine_id')}: {changes}"
+    if name == "log_money":
+        who = args.get("person", "?")
+        return (f"{who} owes you ${float(args.get('amount', 0)):.2f}" if args.get("direction") != "i_owe"
+                else f"You owe {who} ${float(args.get('amount', 0)):.2f}") + (f" ({args['note']})" if args.get("note") else "")
+    if name == "settle_money":
+        return f"Mark money entry {args.get('entry_id')} as paid"
+    if name == "make_promise":
+        return f"Promise: {args.get('text')}" + (f" to {args['to']}" if args.get("to") else "") + (
+            f" by {str(args['by']).replace('T', ' ')}" if args.get("by") else "")
+    if name == "close_promise":
+        return f"Promise {args.get('entry_id')}: {args.get('status')}"
+    if name == "pin_memo":
+        return f"Remember{' (pinned)' if args.get('pinned', True) else ''}: {args.get('text')}"
+    if name == "tick_habit":
+        from .models import Habit
+        h = db.get(Habit, _ids(args.get("habit_id", 0)))
+        return f"Tick habit: {h.name if h else args.get('habit_id')}" + (f" (+{args['amount']})" if args.get("amount") else "")
     if name == "remember":
         return f"Noted: {args.get('note')}"
     if name == "forget":
@@ -251,6 +312,38 @@ def apply_one(db: Session, a: dict) -> str:
                 setattr(r, k, x[k])
         db.commit()
         return "routine changed"
+    if n in ("log_money", "make_promise", "pin_memo", "settle_money", "close_promise"):
+        from . import areas as AR
+        from .models import AreaEntry
+        personal = db.scalar(select(Course).where(Course.kind == "personal"))
+        if personal is None:
+            raise ValueError("there's no Personal area")
+        if n == "log_money":
+            AR.add_entry(db, personal, "iou", _dt(x["due"]) if x.get("due") else None,
+                         {"person": x["person"], "amount": x["amount"], "direction": x.get("direction", "they_owe"),
+                          "note": x.get("note", "")})
+            return "logged"
+        if n == "make_promise":
+            AR.add_entry(db, personal, "promise", _dt(x["by"]) if x.get("by") else None,
+                         {"text": x["text"], "to": x.get("to", "myself"), "status": "open",
+                          **({"minutes": x["minutes"]} if x.get("minutes") else {})})
+            return "promised"
+        if n == "pin_memo":
+            AR.add_entry(db, personal, "memo", None, {"text": x["text"], "pinned": bool(x.get("pinned", True))})
+            return "saved"
+        e = db.get(AreaEntry, _ids(x["entry_id"]))
+        if e is None or e.area_id != personal.id:
+            raise ValueError("that entry doesn't exist")
+        AR.update_entry(db, e, None, {"settled": True} if n == "settle_money" else {"status": x.get("status", "kept")})
+        return "updated"
+    if n == "tick_habit":
+        from . import habits as HB
+        from .models import Habit
+        h = db.get(Habit, _ids(x["habit_id"]))
+        if h is None:
+            raise ValueError("that habit doesn't exist")
+        HB.tap(db, h, service.local_now(db).date(), float(x.get("amount") or 1))
+        return "ticked"
     if n == "remember":
         db.add(AssistantNote(text=str(x["note"])[:500]))
         db.commit()

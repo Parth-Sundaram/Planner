@@ -290,6 +290,8 @@ def plan(now: datetime, horizon_end: datetime, day_start: time, day_end: time,
         t = by_id[tid]
         if tid not in short_hard and t.effective_due < t.due:
             result.warnings.append(Warning("warn", f"{t.title} misses its target ({fmt_time(t.effective_due)}) but makes the real deadline", tid))
+    # Work due after the planning window just isn't placed yet; that's not a shortfall.
+    short_hard = {tid: left for tid, left in short_hard.items() if by_id[tid].due <= horizon_end}
     for tid, left in short_hard.items():
         t = by_id[tid]
         result.warnings.append(Warning("danger", f"{t.title} is {left} min short of fitting before {fmt_dt(t.due)}", tid))

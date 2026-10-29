@@ -87,10 +87,29 @@ Course scrapers were written against the course pages' table layout; if a page c
 ## AI features (all optional, free tier)
 Set `GEMINI_API_KEY` in Render (free key: https://aistudio.google.com/apikey). It powers:
 - reading course pages that have no built-in reader; after the first read it saves a *recipe* and stops calling the AI until the page is redesigned
-- the assistant (Ctrl/⌘ K). Model: `GEMINI_ASSISTANT_MODEL`, default `gemini-2.5-flash-lite` for speed
+- the assistant (Ctrl/⌘ K). Model: `GEMINI_ASSISTANT_MODEL`, default `gemini-3.5-flash-lite` for speed (if Google retires a model, the app switches to the replacement it names)
 - meal photo estimates on the Fitness page
 
 ## Chrome extension
 `extension/` is an unpacked Chrome extension. In Chrome: chrome://extensions → Developer mode → Load unpacked → pick the folder.
 Then open its options, paste your planner URL and the key from Settings → Phone & extension.
 Right-click any page, selection or link → "Add to Planner" (or Alt+Shift+P). Dates in plain words ("by Friday", "every Sunday") are understood.
+
+## Moodle
+Settings → Moodle. Either paste your Moodle **calendar link** (Calendar → Export calendar → Get calendar URL), or add your Moodle site and a **web service key** (instructions in the app). With the key it also brings in quizzes that aren't on the calendar, fills grade-calculator scores from the Moodle gradebook, and marks tasks done when Moodle shows them submitted. Map each Moodle course to a planner course once; items from unmapped courses wait in Tasks for review.
+
+## Personal
+The **Personal** area holds:
+- **Promises**: to someone or to yourself, with an optional date (then it's on your plan). Mark each kept or broken; the page shows how often you've kept your word over the last 60 days.
+- **Money**: who owes you and who you owe. Dated debts become "Pay back" or "Remind" tasks.
+- **Remember**: notes; pinned ones show on Today.
+The assistant can log money, make promises and pin reminders too.
+
+## Roadmap: toward a personal "Jarvis"
+Ideas for later, roughly in order:
+1. **Voice**: push-to-talk in the web app (browser speech recognition → the existing assistant), spoken replies with the browser's speech synthesis; later a phone shortcut ("Hey Siri, tell Planner…") that posts to the assistant API with the personal key.
+2. **Morning and evening briefings**: a spoken or pushed summary of today's plan, deadlines, promises due, money owed; an evening check-in that marks blocks done and sets tomorrow up.
+3. **Proactive nudges**: notifications when a block starts, when a deadline is at risk, when class starts and attendance hasn't been marked.
+4. **More inputs**: GitHub issues/PRs assigned to you, Gradescope, sleep/steps from the phone (endpoint already exists), meal photos (exists).
+5. **Long-term memory**: the assistant's notes grow into a profile of how long things really take you, used for estimates.
+6. **Local model option** (Gemma via Ollama on your own machine) for privacy and offline use.

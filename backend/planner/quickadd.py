@@ -22,7 +22,17 @@ _TIME = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?"
 _NAMED = {"noon": time(12), "midnight": time(23, 59), "morning": time(9), "afternoon": time(15),
           "evening": time(18), "night": time(21), "eod": time(17)}
 
+DAY_LETTER = "MTWRFSU"
+
+
+def _days_repeat(m) -> str:
+    found = sorted({WEEKDAYS[w.lower()] for w in re.findall(_WD, m.group(0), re.I)})
+    return f"weekly:{found[0]}" if len(found) == 1 else "days:" + "".join(DAY_LETTER[d] for d in found)
+
+
 REPEAT = [
+    # "every Mon, Tue, Thu and Fri" / "every mon tue thu fri"
+    (re.compile(rf"\bevery\s+{_WD}(?:\s*(?:,|and|&|/)?\s*{_WD})+\b", re.I), _days_repeat),
     (re.compile(r"\bevery\s*(?:week)?day\b|\bweekdays\b", re.I), lambda m: "weekdays"),
     (re.compile(rf"\bevery\s+{_WD}\b", re.I), lambda m: f"weekly:{WEEKDAYS[m.group(1).lower()]}"),
     (re.compile(r"\b(?:every\s+day|daily)\b", re.I), lambda m: "daily"),
@@ -120,7 +130,10 @@ def parse_when(text: str, now: datetime) -> tuple[datetime | None, str | None, s
             break
 
     if repeat and day is None:
-        if repeat.startswith("weekly:"):
+        if repeat.startswith("days:"):
+            wanted = [DAY_LETTER.index(c) for c in repeat[5:]]
+            day = min((_next_weekday(today, w) for w in wanted))
+        elif repeat.startswith("weekly:"):
             day = _next_weekday(today, int(repeat.split(":")[1]))
         elif repeat == "weekdays":
             day = today if today.weekday() < 5 else _next_weekday(today, 0)
@@ -193,6 +206,12 @@ def guess_area(title: str, areas: list) -> object | None:
 
 
 def next_due(due: datetime, repeat: str) -> datetime:
+    if repeat.startswith("days:"):
+        wanted = {DAY_LETTER.index(c) for c in repeat[5:]}
+        d = due + timedelta(days=1)
+        while d.weekday() not in wanted:
+            d += timedelta(days=1)
+        return d
     if repeat == "daily":
         return due + timedelta(days=1)
     if repeat == "weekdays":
@@ -221,6 +240,9 @@ REPEAT_LABELS = {"daily": "every day", "weekdays": "every weekday", "biweekly": 
 def repeat_label(repeat: str | None) -> str | None:
     if not repeat:
         return None
+    names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     if repeat.startswith("weekly:"):
-        return "every " + ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][int(repeat[7:])]
+        return "every " + names[int(repeat[7:])]
+    if repeat.startswith("days:"):
+        return "every " + ", ".join(names[DAY_LETTER.index(c)][:3] for c in repeat[5:])
     return REPEAT_LABELS.get(repeat, "every week")

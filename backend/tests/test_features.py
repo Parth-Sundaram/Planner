@@ -154,7 +154,7 @@ def test_missing_key_is_reported_not_raised(db, monkeypatch):
 
 def test_courses_seeded_from_defaults_once(db):
     codes = [c.code for c in scrapers.get_courses(db)]
-    assert codes == ["csse304", "csse313", "career", "fitness", "finance"]
+    assert codes == ["csse304", "csse313", "career", "fitness", "finance", "personal"]
     for c in scrapers.get_courses(db):
         db.delete(c)
     db.commit()
@@ -175,7 +175,7 @@ def test_course_api_and_preview(client, monkeypatch):
     monkeypatch.setattr(scrapers, "ask_gemini", ask)
     monkeypatch.setattr(scrapers, "fetch_html", lambda *a, **k: PAGE)
     names = [c["name"] for c in client.get("/api/courses").get_json()["courses"]]
-    assert names == ["PLC", "AI", "Career", "Fitness", "Finance"]
+    assert names == ["PLC", "AI", "Career", "Fitness", "Finance", "Personal"]
     r = client.post("/api/courses", json={"name": "Prac Sec", "url": "https://example.edu/sec", "class_days": "MTRF"})
     assert r.status_code == 201
     c = r.get_json()
