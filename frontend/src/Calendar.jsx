@@ -8,7 +8,9 @@ import { Icon, Seg, useStored } from "./ui.jsx";
 export default function Calendar({ ctx }) {
   const cal = useRef(null);
   const [range, setRange] = useState(null);
-  const [data, setData] = useState({ blocks: [], events: [] });
+  const [data, setData] = useState({ blocks: [], events: [], dirty: false });
+  const [zoom, setZoom] = useStored("cal.zoom", 2);   // 0 = fit the screen, 1-3 = taller hours
+  const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [view, setView] = useStored("cal.view", window.innerWidth < 700 ? "timeGrid3Day" : "timeGridWeek");
   const [showRoutines, setShowRoutines] = useStored("cal.routines", true);
@@ -30,16 +32,46 @@ export default function Calendar({ ctx }) {
     })),
   ];
 
+  // Changes made here are saved and pinned but not rebalanced; the Rebalance button does that.
   async function onChange(info) {
     const b = info.event.extendedProps.block;
     try {
-      await api.patch(`/api/blocks/${b.id}`, { start: toLocalISO(info.event.start), end: toLocalISO(info.event.end) });
-      ctx.notify("Pinned there. Everything else replanned around it");
+      await api.patch(`/api/blocks/${b.id}?replan=0`, { start: toLocalISO(info.event.start), end: toLocalISO(info.event.end) });
+      ctx.notify("Pinned there. Press Rebalance when you're done moving things");
       ctx.refresh();
     } catch (e) {
       info.revert();
       ctx.notify(e.message, "error");
     }
+  }
+
+  async function rebalance() {
+    setBusy(true);
+    try { await api.post("/api/replan"); ctx.notify("Rebalanced around your changes"); ctx.refresh(); }
+    catch (e) { ctx.notify(e.message, "error"); }
+    finally { setBusy(false); }
+  }
+
+  // What the × on a block does, or null when it has none.
+  function removal(b) {
+    if (b.kind === "event" || b.status !== "planned") return null;
+    if (b.kind === "task") return { label: "Delete task", run: () => confirm(`Delete "${b.title}" and all of its planned time?`)
+      && api.del(`/api/tasks/${b.task_id}?replan=0`), msg: "Task deleted" };
+    if (b.kind === "appointment" || b.kind === "busy") return { label: "Delete", run: () => api.post(`/api/blocks/${b.id}/remove?replan=0`), msg: "Deleted" };
+    if (b.kind === "routine" && !["class", "appointment"].includes(b.category))
+      return { label: "Skip this day", run: () => api.post(`/api/blocks/${b.id}/skip?replan=0`), msg: "Skipped for that day" };
+    return null;
+  }
+
+  async function onClick(info) {
+    const b = info.event.extendedProps.block;
+    if (info.jsEvent.target.closest?.(".ev-del")) {
+      const r = removal(b);
+      try { if (r && (await r.run()) !== false) { ctx.notify(`${r.msg}. Press Rebalance when you're done`); ctx.refresh(); } }
+      catch (e) { ctx.notify(e.message, "error"); }
+      return;
+    }
+    ctx.openBlock(b, { defer: true });
   }
 
   function renderEvent(arg) {
@@ -50,6 +82,7 @@ export default function Calendar({ ctx }) {
     const cls = `ev ${b.kind} cat-${cat} ${b.status || ""} c-${course?.color || "blue"} ${mins < 30 ? "tiny" : ""} ${mins < 10 ? "sliver" : ""}`;
     return (
       <div className={cls} title={`${b.title} · ${arg.timeText}`}>
+        {removal(b) && <button type="button" className="ev-del" title={removal(b).label} aria-label={removal(b).label}><Icon name={b.kind === "routine" ? "x" : "trash"} size={11} /></button>}
         <span className="ev-t">{["appointment", "meeting", "class"].includes(cat) && <span className="ev-ico">{cat === "class" ? "▣" : "◆"}</span>}
           {b.title}{b.locked && cat === "work" && <span className="pin">●</span>}</span>
         {mins >= 40 && <div className="ev-time">{arg.timeText}</div>}
@@ -70,11 +103,20 @@ export default function Calendar({ ctx }) {
           <button className="icon-btn" onClick={() => api_()?.next()} aria-label="Next">›</button>
         </div>
         <div className="row">
+          <button className={`btn sm ${data.dirty ? "primary" : ""}`} onClick={rebalance} disabled={busy}
+                  title="Re-place the work the planner manages around everything you moved or pinned">
+            <Icon name="spark" size={14} />{busy ? "Rebalancing…" : "Rebalance"}{data.dirty && <span className="dot" />}
+          </button>
+          <span className="row" style={{ gap: 2 }}>
+            <button className="icon-btn" onClick={() => setZoom(Math.max(0, zoom - 1))} disabled={zoom === 0} aria-label="Zoom out" title="Zoom out">−</button>
+            <button className="icon-btn" onClick={() => setZoom(Math.min(3, zoom + 1))} disabled={zoom === 3} aria-label="Zoom in" title="Zoom in">+</button>
+          </span>
           <label className="check-label muted"><input type="checkbox" checked={showRoutines} onChange={(e) => setShowRoutines(e.target.checked)} />Meals and routines</label>
           <Seg value={view} onChange={changeView} options={[["timeGridDay", "Day"], ["timeGrid3Day", "3 days"], ["timeGridWeek", "Week"]]} />
         </div>
       </div>
-      <div className="cal-wrap">
+      {data.dirty && <div className="dirty-bar">You've changed things here. The rest of the plan hasn't moved yet. <button className="btn sm primary" onClick={rebalance} disabled={busy}>Rebalance now</button></div>}
+      <div className={`cal-wrap zoom-${zoom}`}>
         <FullCalendar
           ref={cal}
           plugins={[timeGridPlugin, interactionPlugin]}
@@ -84,7 +126,7 @@ export default function Calendar({ ctx }) {
           firstDay={1}
           slotMinTime="07:00:00"
           slotMaxTime="24:00:00"
-          scrollTime="08:00:00"
+          scrollTime={`${String(Math.max(7, new Date().getHours() - 1)).padStart(2, "0")}:00:00`}
           slotDuration="00:30:00"
           slotLabelFormat={{ hour: "numeric", meridiem: "short" }}
           dayHeaderFormat={{ weekday: "short", day: "numeric" }}
@@ -93,12 +135,12 @@ export default function Calendar({ ctx }) {
           allDaySlot={false}
           snapDuration="00:05:00"
           height="100%"
-          expandRows
+          expandRows={zoom === 0}
           events={events}
           eventContent={renderEvent}
           eventDrop={onChange}
           eventResize={onChange}
-          eventClick={(info) => ctx.openBlock(info.event.extendedProps.block)}
+          eventClick={onClick}
           selectable
           selectMirror
           select={(info) => { setNewAppt({ start: toLocalISO(info.start), end: toLocalISO(info.end) }); setApptTitle(""); }}
@@ -111,7 +153,7 @@ export default function Calendar({ ctx }) {
                 onSubmit={async (e) => {
                   e.preventDefault();
                   if (!apptTitle.trim()) return;
-                  try { await api.post("/api/appointments", { title: apptTitle, ...newAppt }); ctx.notify("Added. The plan moves around it"); setNewAppt(null); ctx.refresh(); }
+                  try { await api.post("/api/appointments?replan=0", { title: apptTitle, ...newAppt }); ctx.notify("Added. Press Rebalance to fit the plan around it"); setNewAppt(null); ctx.refresh(); }
                   catch (err) { ctx.notify(err.message, "error"); }
                 }}>
             <b>New appointment</b>
@@ -128,7 +170,7 @@ export default function Calendar({ ctx }) {
         <span><i className="lg routine" />Meals & routines</span>
         <span><i className="lg event" />Google Calendar</span>
       </div>
-      <div className="hint"><Icon name="pin" size={12} /> Drag across empty time to add an appointment. Drag, drag the bottom edge to resize, click for Done / Not now / Skip. Anything you move stays pinned.</div>
+      <div className="hint"><Icon name="pin" size={12} /> Drag across empty time to add an appointment. Drag to move, drag the bottom edge to resize, hover for the delete button, click for more. Anything you move stays pinned, and nothing else moves until you press Rebalance.</div>
     </div>
   );
 }

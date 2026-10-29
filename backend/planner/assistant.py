@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 import requests
@@ -39,10 +40,16 @@ TOOLS = [
      "parameters": {"type": "OBJECT", "properties": {"block_id": I, "start": S, "end": S}, "required": ["block_id", "start", "end"]}},
     {"name": "not_now", "description": "Free a work block's slot; its work moves later (still before the deadline).",
      "parameters": {"type": "OBJECT", "properties": {"block_id": I}, "required": ["block_id"]}},
-    {"name": "skip_routine", "description": "Skip a routine block (meal, gym, chore) for that day only.",
+    {"name": "skip_routine", "description": "Skip a routine block for that day only: a meal, gym or chore, or a class or "
+                                            "fixed meeting that's cancelled that day.",
      "parameters": {"type": "OBJECT", "properties": {"block_id": I}, "required": ["block_id"]}},
-    {"name": "block_time", "description": "Block off time (sick, errand, meeting not on the calendar) so nothing is planned then.",
+    {"name": "block_time", "description": "Block off unnamed time (sick, errand) so nothing is planned then.",
      "parameters": {"type": "OBJECT", "properties": {"start": S, "minutes": I, "title": S}, "required": ["start", "minutes"]}},
+    {"name": "add_appointment", "description": "Add a fixed-time event: a demo, meeting, office hours, dentist. Shown as an "
+                                               "appointment; the plan works around it. weeks > 1 repeats it weekly.",
+     "parameters": {"type": "OBJECT", "properties": {
+         "title": S, "start": {**S, "description": "YYYY-MM-DDTHH:MM local time"}, "end": {**S, "description": "YYYY-MM-DDTHH:MM"},
+         "weeks": {**I, "description": "how many weeks in a row, default 1"}}, "required": ["title", "start", "end"]}},
     {"name": "update_routine", "description": "Change a weekly routine: days (subset of MTWRFSU), window, length, or turn it off.",
      "parameters": {"type": "OBJECT", "properties": {"routine_id": I, "days": S, "window_start": S, "window_end": S,
                                                      "duration": I, "active": B}, "required": ["routine_id"]}},
@@ -78,14 +85,18 @@ replans after every change, so you usually change inputs (deadlines, estimates, 
 blocked time, skips) rather than placing every block by hand.
 
 Be brief and concrete: one or two sentences, then propose actions. Use ids from the snapshot.
-Times are local, formatted YYYY-MM-DDTHH:MM. Never invent tasks or meetings the user didn't
+Times are local, formatted YYYY-MM-DDTHH:MM with the full year; work out dates from NOW in the
+snapshot ("tomorrow", "Friday" = the next one). Handle every part of the request, one action per
+change: "skip gym and do X then" is a skip_routine plus a move_block of X's block into that slot.
+Fixed-time events (demos, meetings, appointments) are add_appointment, not add_task; a cancelled
+class or meeting is skip_routine on that day's block. Never invent tasks or meetings the user didn't
 mention. If a request is ambiguous in a way that matters, ask one short question instead of
 acting. When the user tells you something durable about how they work, call remember.
 If everything can't fit, say what slips and suggest the trade-off; don't silently drop things."""
 
 
 def _fmt(dt: datetime | None) -> str:
-    return dt.strftime("%a %m-%d %H:%M") if dt else "-"
+    return dt.strftime("%a %Y-%m-%d %H:%M") if dt else "-"
 
 
 def snapshot(db: Session, now: datetime) -> str:
@@ -157,10 +168,8 @@ def _call(contents: list, system: str) -> dict:
     if not key:
         raise RuntimeError("The assistant needs GEMINI_API_KEY (free, from Google AI Studio) set in Render.")
     model = os.getenv("GEMINI_ASSISTANT_MODEL", "gemini-3.5-flash-lite")
-    gen = {"temperature": 0.3}
-    if "2.5" in model:
-        gen["thinkingConfig"] = {"thinkingBudget": 0}  # fastest replies; the snapshot does the heavy lifting
-    r = gemini.post(model, key, timeout=45, json={
+    gen = {"temperature": 0.3}  # fast=True below turns thinking down; the snapshot does the heavy lifting
+    r = gemini.post(model, key, timeout=40, fast=True, retries=1, json={
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
         "tools": [{"functionDeclarations": TOOLS}],
@@ -198,6 +207,10 @@ def describe(db: Session, name: str, args: dict) -> str:
         return f"Not now: {blk(args.get('block_id'))}"
     if name == "skip_routine":
         return f"Skip {blk(args.get('block_id'))}"
+    if name == "add_appointment":
+        weeks = int(args.get("weeks") or 1)
+        return (f"Appointment \"{args.get('title')}\" {str(args.get('start', '')).replace('T', ' ')}–{str(args.get('end', ''))[-5:]}"
+                + (f", weekly for {weeks} weeks" if weeks > 1 else ""))
     if name == "block_time":
         return f"Block {args.get('minutes')} min at {str(args.get('start', '')).replace('T', ' ')}: {args.get('title') or 'Busy'}"
     if name == "update_routine":
@@ -228,25 +241,90 @@ def describe(db: Session, name: str, args: dict) -> str:
     return name
 
 
-def chat(db: Session, message: str, now: datetime | None = None) -> dict:
-    now = now or service.local_now(db)
-    history = list(db.scalars(select(AssistantMessage).order_by(AssistantMessage.id.desc()).limit(10)))[::-1]
-    contents = [{"role": m.role, "parts": [{"text": m.text or "(proposed changes)"}]} for m in history]
-    contents.append({"role": "user", "parts": [{"text": f"{message}\n\n--- PLAN SNAPSHOT ---\n{snapshot(db, now)}"}]})
-    resp = _call(contents, SYSTEM)
-    parts = (resp.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
-    text = " ".join(p["text"].strip() for p in parts if p.get("text")).strip()
-    actions = []
+DATE_KEYS = ("due", "start", "end", "by")
+
+
+def fix_date(v, now: datetime, ref: datetime | None = None) -> str:
+    """Models sometimes guess the wrong year (or send only a time). Snap to the sensible date."""
+    v = str(v).strip().replace(" ", "T").replace("Z", "")
+    if re.fullmatch(r"\d{1,2}:\d{2}", v):  # time only: same day as ref (or today)
+        h, m = map(int, v.split(":"))
+        return ((ref or now).replace(hour=h, minute=m, second=0, microsecond=0)).strftime("%Y-%m-%dT%H:%M")
+    try:
+        dt = datetime.fromisoformat(v[:16])
+    except ValueError:
+        return v
+    if not (now - timedelta(days=1) <= dt <= now + timedelta(days=400)):
+        cands = []
+        for y in (now.year - 1, now.year, now.year + 1):
+            try:
+                cands.append(dt.replace(year=y))
+            except ValueError:  # Feb 29
+                pass
+        ok = [c for c in cands if c >= now - timedelta(days=1)]
+        if ok:
+            dt = min(ok, key=lambda c: abs((c - now).total_seconds()))
+    return dt.strftime("%Y-%m-%dT%H:%M")
+
+
+def fix_args(args: dict, now: datetime) -> dict:
+    out = dict(args)
+    ref = None
+    for k in DATE_KEYS:
+        if out.get(k):
+            out[k] = fix_date(out[k], now, ref)
+            if ref is None and re.match(r"\d{4}-\d{2}-\d{2}T", out[k]):
+                ref = datetime.fromisoformat(out[k][:16])
+    return out
+
+
+def request_parts(message: str) -> int:
+    """Rough count of separate things asked for ("skip gym and do X then" = 2)."""
+    segs = re.split(r"[,;.\n]|\b(?:and|then|also|plus|instead)\b", message, flags=re.I)
+    return sum(1 for x in segs if len(x.split()) >= 2)
+
+
+def _actions_from(db: Session, parts: list, now: datetime, first_id: int = 0) -> list[dict]:
+    names = {t["name"] for t in TOOLS}
+    out = []
     for i, p in enumerate(parts):
         fc = p.get("functionCall")
-        if not fc or fc.get("name") not in {t["name"] for t in TOOLS}:
+        if not fc or fc.get("name") not in names:
             continue
-        args = fc.get("args") or {}
-        a = {"id": i, "name": fc["name"], "args": args, "summary": describe(db, fc["name"], args)}
-        if fc["name"] in IMMEDIATE:
+        args = fix_args(fc.get("args") or {}, now)
+        out.append({"id": first_id + i, "name": fc["name"], "args": args, "summary": describe(db, fc["name"], args)})
+    return out
+
+
+def _parts(resp: dict) -> list:
+    return (resp.get("candidates") or [{}])[0].get("content", {}).get("parts", []) or []
+
+
+def chat(db: Session, message: str, now: datetime | None = None) -> dict:
+    now = now or service.local_now(db)
+    snap = snapshot(db, now)
+    history = list(db.scalars(select(AssistantMessage).order_by(AssistantMessage.id.desc()).limit(10)))[::-1]
+    contents = [{"role": m.role, "parts": [{"text": m.text or "(proposed changes)"}]} for m in history]
+    contents.append({"role": "user", "parts": [{"text": f"{message}\n\n--- PLAN SNAPSHOT ---\n{snap}"}]})
+    parts = _parts(_call(contents, SYSTEM))
+    text = " ".join(p["text"].strip() for p in parts if p.get("text")).strip()
+    actions = _actions_from(db, parts, now)
+    # Missed part of the request? Ask once more for only what's missing. If that fails, keep what we have.
+    if actions and not text.endswith("?") and request_parts(message) > len(actions):
+        done = "\n".join(f"- {a['summary']}" for a in actions)
+        ask = (f"{message}\n\nALREADY PROPOSED (don't repeat these):\n{done}\n\nIf part of the request above isn't "
+               f"covered yet, propose only the missing actions. If everything is covered, reply with just: covered."
+               f"\n\n--- PLAN SNAPSHOT ---\n{snap}")
+        try:
+            more = _actions_from(db, _parts(_call([{"role": "user", "parts": [{"text": ask}]}], SYSTEM)), now, first_id=100)
+            seen = {(a["name"], json.dumps(a["args"], sort_keys=True)) for a in actions}
+            actions += [a for a in more if (a["name"], json.dumps(a["args"], sort_keys=True)) not in seen]
+        except Exception:
+            pass
+    for a in actions:
+        if a["name"] in IMMEDIATE:
             a["result"] = apply_one(db, a)
             a["applied"] = True
-        actions.append(a)
     db.add(AssistantMessage(role="user", text=message))
     db.add(AssistantMessage(role="model", text=text or "; ".join(a["summary"] for a in actions),
                             actions=json.dumps(actions)))
@@ -292,8 +370,19 @@ def apply_one(db: Session, a: dict) -> str:
         db.commit()
         return "updated"
     if n == "move_block":
-        service.move_block(db, _ids(x["block_id"]), _dt(x["start"]), _dt(x["end"]))
+        b = db.get(Block, _ids(x["block_id"]))
+        start, end = _dt(x["start"]), _dt(x["end"])
+        if b is not None and b.kind == "task" and b.task_id:
+            t = db.get(Task, b.task_id)
+            if t is not None and t.due < end:  # you asked to do it then, so that's the new deadline
+                t.due = end
+        service.move_block(db, _ids(x["block_id"]), start, end)
         return "moved"
+    if n == "add_appointment":
+        start, end = _dt(x["start"]), _dt(x["end"])
+        for w in range(max(1, min(int(x.get("weeks") or 1), 26))):
+            service.add_appointment(db, x["title"], start + timedelta(weeks=w), end + timedelta(weeks=w))
+        return "added"
     if n == "not_now":
         service.not_now(db, _ids(x["block_id"]))
         return "pushed later"

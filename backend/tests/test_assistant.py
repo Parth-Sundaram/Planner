@@ -116,3 +116,72 @@ def test_tick_habit_tool(db):
     assert assistant.apply(db, [{"id": 0, "name": "tick_habit", "args": {"habit_id": f"h{hid}", "amount": 2}}])[0]["ok"]
     h = HB.summary(db, NOW.date(), 7)[0]
     assert h["today"]["value"] == 2.0 and not h["today"]["done"]
+
+
+def test_wrong_year_and_time_only_are_fixed(db):
+    now = datetime(2026, 10, 29, 14, 10)
+    assert assistant.fix_date("2025-10-30T10:15", now) == "2026-10-30T10:15"
+    assert assistant.fix_date("2025-01-05T09:00", now) == "2027-01-05T09:00"
+    assert assistant.fix_date("2026-10-29T09:00", now) == "2026-10-29T09:00"   # earlier today is fine
+    args = assistant.fix_args({"block_id": 3, "start": "2025-10-30T10:15", "end": "10:30"}, now)
+    assert args == {"block_id": 3, "start": "2026-10-30T10:15", "end": "2026-10-30T10:30"}
+    assert "2026-10-2" in assistant.snapshot(db, NOW).split("BLOCKS")[1][:200]  # dates carry the year
+
+
+def test_missed_part_triggers_one_follow_up(db, monkeypatch):
+    gym = db.scalar(select(Block).where(Block.kind == "routine", Block.start >= datetime(2026, 10, 21)))
+    work = db.scalar(select(Block).where(Block.kind == "task"))
+    seen = []
+    replies = [
+        [{"functionCall": {"name": "skip_routine", "args": {"block_id": gym.id}}}],
+        [{"functionCall": {"name": "skip_routine", "args": {"block_id": gym.id}}},   # repeated: dropped
+         {"functionCall": {"name": "move_block", "args": {"block_id": work.id, "start": "2025-10-21T15:00", "end": "16:00"}}}],
+    ]
+
+    def call(contents, system):
+        seen.append(contents)
+        return {"candidates": [{"content": {"parts": replies[len(seen) - 1]}}]}
+    monkeypatch.setattr(assistant, "_call", call)
+    r = assistant.chat(db, "Get rid of gym tomorrow and instead put CNN then")
+    assert [a["name"] for a in r["actions"]] == ["skip_routine", "move_block"]
+    assert r["actions"][1]["args"]["start"] == "2026-10-21T15:00" and r["actions"][1]["args"]["end"] == "2026-10-21T16:00"
+    assert "ALREADY PROPOSED" in seen[1][0]["parts"][0]["text"]
+    # one-part requests don't pay for a second call
+    seen.clear(); replies[0] = [{"functionCall": {"name": "skip_routine", "args": {"block_id": gym.id}}}]
+    assistant.chat(db, "skip gym tomorrow")
+    assert len(seen) == 1
+
+
+def test_follow_up_failure_keeps_first_actions(db, monkeypatch):
+    gym = db.scalar(select(Block).where(Block.kind == "routine", Block.start >= datetime(2026, 10, 21)))
+    n = []
+
+    def call(contents, system):
+        n.append(1)
+        if len(n) > 1:
+            raise RuntimeError("Gemini took too long")
+        return {"candidates": [{"content": {"parts": [{"functionCall": {"name": "skip_routine", "args": {"block_id": gym.id}}}]}}]}
+    monkeypatch.setattr(assistant, "_call", call)
+    r = assistant.chat(db, "skip gym tomorrow and then move CNN there")
+    assert [a["name"] for a in r["actions"]] == ["skip_routine"]
+
+
+def test_weekly_appointment_and_moving_past_deadline(db):
+    a = {"id": 0, "name": "add_appointment", "args": {"title": "DB demo", "start": "2026-10-23T09:40", "end": "2026-10-23T10:10", "weeks": 3}}
+    assert "weekly for 3 weeks" in assistant.describe(db, a["name"], a["args"])
+    assert all(x["ok"] for x in assistant.apply(db, [a]))
+    demos = list(db.scalars(select(Block).where(Block.kind == "appointment", Block.title == "DB demo").order_by(Block.start)))
+    assert [d.start for d in demos] == [datetime(2026, 10, 23, 9, 40) + timedelta(weeks=w) for w in range(3)]
+    task = db.scalar(select(Task))
+    work = db.scalar(select(Block).where(Block.kind == "task", Block.task_id == task.id))
+    assistant.apply(db, [{"id": 1, "name": "move_block", "args": {"block_id": work.id, "start": "2026-10-22T10:00", "end": "2026-10-22T12:30"}}])
+    db.refresh(task)
+    assert task.due == datetime(2026, 10, 22, 12, 30)
+
+
+def test_class_can_be_skipped_for_a_day(db):
+    db.add(Routine(title="Class", days="MTWRF", window_start="10:00", window_end="10:50", duration=50, kind="class"))
+    db.commit(); service.replan(db, NOW)
+    cls = db.scalar(select(Block).where(Block.title == "Class", Block.start >= datetime(2026, 10, 23)))
+    res = assistant.apply(db, [{"id": 0, "name": "skip_routine", "args": {"block_id": cls.id}}])
+    assert res[0]["ok"] and db.get(Block, cls.id).status == "skipped"

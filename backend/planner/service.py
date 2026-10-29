@@ -1,8 +1,10 @@
 """Glue between the database and the pure scheduler: replanning, check-ins, quick-add parsing."""
 from __future__ import annotations
 
+import contextvars
 import json
 import re
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -112,7 +114,28 @@ def materialize_repeats(db: Session, until: datetime) -> int:
     return made
 
 
+_deferred = contextvars.ContextVar("planner_defer_replan", default=False)
+
+
+@contextmanager
+def deferred_replan():
+    """Inside this, changes are saved but nothing is rebalanced; the plan is marked as needing it."""
+    token = _deferred.set(True)
+    try:
+        yield
+    finally:
+        _deferred.reset(token)
+
+
+def plan_dirty(db: Session) -> bool:
+    return get_settings(db).get("plan_dirty") == "1"
+
+
 def replan(db: Session, now: datetime | None = None) -> dict:
+    if _deferred.get():
+        set_setting(db, "plan_dirty", "1")
+        db.commit()
+        return {**json.loads(get_settings(db).get("last_plan") or "{}"), "deferred": True}
     now = now or local_now(db)
     cfg = get_settings(db)
     horizon_end = datetime.combine(now.date() + timedelta(days=int(cfg["horizon_days"])), time.min)
@@ -212,6 +235,7 @@ def replan(db: Session, now: datetime | None = None) -> dict:
         "shortfall": result.shortfall,
     }
     set_setting(db, "last_plan", json.dumps(summary))
+    set_setting(db, "plan_dirty", "0")
     db.commit()
     return summary
 

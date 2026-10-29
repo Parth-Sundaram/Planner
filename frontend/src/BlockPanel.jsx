@@ -6,22 +6,30 @@ const KIND = { work: "Work block", meeting: "Meeting (to fit in)", appointment: 
   routine: "Routine", busy: "Blocked time", event: "Google Calendar" };
 
 // Opens when you click a block on Today or the calendar.
-export default function BlockPanel({ block: b, ctx, onClose }) {
+// From the calendar (defer): changes are saved but not rebalanced until you press Rebalance.
+export default function BlockPanel({ block: b, ctx, onClose, defer = false }) {
   const [partial, setPartial] = useState(null);
   const [when, setWhen] = useState({ date: b.start.slice(0, 10), start: b.start.slice(11, 16), end: b.end.slice(11, 16) });
   const length = minutesBetween(b.start, b.end);
   const planned = b.status === "planned" || !b.status;
   const course = ctx.courseById[b.course_id];
 
+  const q = defer ? "?replan=0" : "";
   async function act(fn, msg) {
-    try { await fn(); ctx.notify(msg); onClose(); ctx.refresh(); } catch (e) { ctx.notify(e.message, "error"); }
+    try { await fn(); ctx.notify(defer ? `${msg.split(".")[0]}. Press Rebalance when you're done` : msg); onClose(); ctx.refresh(); }
+    catch (e) { ctx.notify(e.message, "error"); }
   }
-  const post = (path, body) => api.post(`/api/blocks/${b.id}/${path}`, body);
+  const post = (path, body) => api.post(`/api/blocks/${b.id}/${path}${q}`, body);
+  const taskId = b.task_id;  // for a step, just that step
+  function deleteTask() {
+    if (!confirm(`Delete "${b.title}" and all of its planned time?`)) return;
+    act(() => api.del(`/api/tasks/${taskId}${q}`), "Task deleted. Everything else replanned");
+  }
 
   function saveTimes(e) {
     e.preventDefault();
     if (when.end <= when.start) return ctx.notify("End has to be after start", "error");
-    act(() => api.patch(`/api/blocks/${b.id}`, { start: `${when.date}T${when.start}`, end: `${when.date}T${when.end}` }),
+    act(() => api.patch(`/api/blocks/${b.id}${q}`, { start: `${when.date}T${when.start}`, end: `${when.date}T${when.end}` }),
       "Moved and pinned. Everything else replanned around it");
   }
 
@@ -47,6 +55,7 @@ export default function BlockPanel({ block: b, ctx, onClose }) {
             <button className="btn" onClick={() => setPartial(partial === null ? Math.round(length / 2) : null)}>Partly done</button>
             <button className="btn" title="Free this slot. The work moves later, still before its deadline"
                     onClick={() => act(() => post("not-now"), "Moved later. This slot went to other work")}>Not now</button>
+            <button className="btn danger" title="Delete the whole task, not just this block" onClick={deleteTask}><Icon name="trash" />Delete task</button>
           </div>
           {partial !== null && (
             <form className="row" style={{ marginTop: 10 }}
@@ -64,6 +73,9 @@ export default function BlockPanel({ block: b, ctx, onClose }) {
           <button className="btn ok" onClick={() => act(() => post("checkin", { status: "done" }), "Done")}><Icon name="check" />Done</button>
           <button className="btn" title="Skip for this day only. It's back tomorrow" onClick={() => act(() => post("skip"), "Skipped for today. That time is free now")}>Skip today</button>
         </div>
+      )}
+      {b.kind === "routine" && planned && (b.category === "class" || b.category === "appointment") && (
+        <button className="btn" title="Only this day. It's back next time" onClick={() => act(() => post("skip"), "Marked cancelled for this day. That time is free now")}>Cancelled this day</button>
       )}
       {b.kind === "routine" && b.status === "skipped" && (
         <button className="btn primary" onClick={() => act(() => post("restore"), "Back in the plan")}>Put it back</button>

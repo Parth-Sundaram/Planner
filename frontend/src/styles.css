@@ -386,3 +386,28 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .lg.routine { background: var(--hover); border-left: 3px solid var(--line-2); }
 .lg.event { background: var(--bg); border: 1px solid var(--line-2); border-left: 3px solid var(--text-3); }
 .fc .fc-highlight { background: color-mix(in srgb, var(--c-purple) 15%, transparent); }
+
+/* Calendar zoom: 0 fits the whole day on screen, 1-3 make each hour taller (the grid scrolls) */
+.cal-wrap.zoom-0 .fc .fc-timegrid-slot { height: 14px; }
+.cal-wrap.zoom-1 .fc .fc-timegrid-slot { height: 26px; }
+.cal-wrap.zoom-2 .fc .fc-timegrid-slot { height: 40px; }
+.cal-wrap.zoom-3 .fc .fc-timegrid-slot { height: 56px; }
+.cal-wrap.zoom-2 .fc, .cal-wrap.zoom-3 .fc { font-size: 13px; }
+.cal-wrap.zoom-2 .ev .ev-time, .cal-wrap.zoom-3 .ev .ev-time { font-size: 11.5px; }
+
+/* Delete / skip button that shows on hover */
+.ev { position: relative; }
+.ev-del { position: absolute; top: 2px; right: 2px; z-index: 2; display: none; place-items: center; width: 20px; height: 20px;
+  border: 0; border-radius: 4px; padding: 0; cursor: pointer; background: var(--surface); color: var(--text-2);
+  box-shadow: 0 0 0 1px var(--line-2); }
+.ev-del:hover { color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
+.fc-event:hover .ev-del { display: grid; }
+.ev.tiny .ev-del { top: 50%; transform: translateY(-50%); width: 16px; height: 16px; }
+.ev.sliver .ev-del { display: none !important; }
+@media (hover: none) { .ev-del { display: grid; opacity: 0.85; } .ev.tiny .ev-del { display: none; } }
+
+/* Unrebalanced changes */
+.dirty-bar { display: flex; align-items: center; gap: 10px; justify-content: space-between; flex-wrap: wrap;
+  padding: 7px 10px; margin-bottom: 10px; border-radius: var(--radius); font-size: 13px;
+  background: color-mix(in srgb, var(--warn) 11%, transparent); color: color-mix(in srgb, var(--warn) 60%, var(--text)); }
+.btn .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-left: 2px; }

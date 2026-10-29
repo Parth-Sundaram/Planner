@@ -136,9 +136,16 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
     @app.before_request
     def open_db():
         g.db = Session()
+        # ?replan=0: save the change but don't rebalance (the calendar's "Rebalance" button does that)
+        if request.args.get("replan") == "0":
+            g.defer = service.deferred_replan()
+            g.defer.__enter__()
 
     @app.teardown_request
     def close_db(exc):
+        defer = g.pop("defer", None)
+        if defer is not None:
+            defer.__exit__(None, None, None)
         db = g.pop("db", None)
         if db:
             if exc:
@@ -366,6 +373,9 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
     @login_required
     def delete_task(tid):
         t = g.db.get(Task, tid) or abort(404)
+        ids = [t.id] + [c.id for c in service.subtasks_of(g.db, t.id)]
+        for b in g.db.scalars(select(Block).where(Block.task_id.in_(ids), Block.status == "planned")):
+            g.db.delete(b)  # its planned blocks go with it (done/partial history stays)
         g.db.delete(t)
         g.db.commit()
         return jsonify(plan=service.replan(g.db))
@@ -404,7 +414,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         end = parse_dt(request.args.get("end")) or start + timedelta(days=7)
         blocks = g.db.scalars(select(Block).where(Block.end > start, Block.start < end).order_by(Block.start)).all()
         events = g.db.scalars(select(ExternalEvent).where(ExternalEvent.end > start, ExternalEvent.start < end)).all()
-        return jsonify(blocks=blocks_json(g.db, blocks),
+        return jsonify(blocks=blocks_json(g.db, blocks), dirty=service.plan_dirty(g.db),
                        events=[{"id": e.id, "title": e.title, "start": iso(e.start), "end": iso(e.end)} for e in events])
 
     @app.patch("/api/blocks/<int:bid>")

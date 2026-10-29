@@ -87,7 +87,7 @@ export default function App() {
   const ctx = {
     version, refresh, notify, courses, courseById, aiReady, me,
     openTask: (id) => setPanel({ type: "task", id }),
-    openBlock: (block) => setPanel({ type: "block", block }),
+    openBlock: (block, opts = {}) => setPanel({ type: "block", block, defer: !!opts.defer }),
   };
   const nav = (href, icon, label, active, extra) => (
     <a className={`nav-item ${active ? "active" : ""}`} href={href}>
@@ -141,7 +141,7 @@ export default function App() {
         {route.page === "settings" && <Settings ctx={ctx} />}
       </main>
       {panel?.type === "task" && <TaskPanel key={panel.id} id={panel.id} ctx={ctx} onClose={() => setPanel(null)} />}
-      {panel?.type === "block" && <BlockPanel key={panel.block.id + panel.block.kind} block={panel.block} ctx={ctx} onClose={() => setPanel(null)} />}
+      {panel?.type === "block" && <BlockPanel key={panel.block.id + panel.block.kind} block={panel.block} defer={panel.defer} ctx={ctx} onClose={() => setPanel(null)} />}
       <Assistant ctx={ctx} />
       {toast && <div className={`toast ${toast.kind}`} role="status">{toast.msg}</div>}
     </div>
