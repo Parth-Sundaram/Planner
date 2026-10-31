@@ -74,6 +74,7 @@ export function CoursePage({ id, ctx }) {
           <span><b style={{ color: "var(--text)" }}>{open.length}</b> open</span>·
           <span><b style={{ color: "var(--text)" }}>{fmtMinutes(Math.round(plannedMin))}</b> of work planned</span>
           {d.grades.current != null && <>·<span><b style={{ color: "var(--text)" }}>{d.grades.current.toFixed(1)}%</b> current grade</span></>}
+          ·<LeadDays c={c} save={save} />
         </div>
       </div>
 
@@ -528,6 +529,7 @@ function AreaPage({ d, ctx, reload }) {
           <span className="faint">·</span>
           <span className="row" style={{ gap: 4 }}>Quick-add files tasks here when they mention
             <Field value={c.keywords} placeholder="keywords, comma separated" style={{ width: 240 }} onSave={(v) => save({ keywords: v }, "Keywords saved")} /></span>
+          <span className="faint">·</span><LeadDays c={c} save={save} />
         </div>
         <Links c={c} save={save} />
       </div>
@@ -562,5 +564,17 @@ function MoodleGradebook({ courseId, version }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// How far ahead of a deadline work can start. Empty = by size (2 days for short work, up to a week for big work).
+function LeadDays({ c, save }) {
+  return (
+    <span className="row" style={{ gap: 4 }} title="Empty: short work starts about 2 days ahead, up to 3 hours about 4 days, bigger work about a week. 0 = no limit.">
+      Start work up to
+      <Field type="number" value={c.lead_days ?? ""} placeholder="auto" style={{ width: 52 }}
+             onSave={(v) => save({ lead_days: v === "" || v == null ? null : Math.max(0, Number(v)) }, "Saved. Replanned")} />
+      days before it's due
+    </span>
   );
 }

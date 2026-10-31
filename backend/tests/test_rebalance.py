@@ -54,3 +54,36 @@ def test_normal_requests_still_replan(client):
     blk = next(x for x in blocks(client)["blocks"] if x["task_id"] == a["id"])
     client.patch(f"/api/blocks/{blk['id']}", json={"start": "2026-10-29T13:00", "end": "2026-10-29T14:00"})
     assert blocks(client)["dirty"] is False
+
+
+def test_start_window_keeps_far_off_work_out_of_this_week(client):
+    small = client.post("/api/tasks", json={"title": "Reading", "due": "2026-11-03T17:00", "est_minutes": 45}).get_json()["task"]
+    big = client.post("/api/tasks", json={"title": "Project", "due": "2026-11-03T17:00", "est_minutes": 300}).get_json()["task"]
+    bl = blocks(client)["blocks"]
+    first = lambda tid: min(x["start"] for x in bl if x["task_id"] == tid)
+    assert first(small["id"]) >= "2026-11-01"      # ~2 days ahead
+    assert first(big["id"]) < "2026-11-01"         # big work starts earlier
+
+
+def test_window_relaxes_when_work_would_not_fit(client):
+    # Fri to Tue are fully booked, so a 4-day window (starting Fri) has no room
+    client.post("/api/appointments", json={"title": "Trip", "start": "2026-10-30T00:00", "end": "2026-11-03T23:00"})
+    t = client.post("/api/tasks", json={"title": "Lab report", "due": "2026-11-03T23:30", "est_minutes": 150}).get_json()["task"]
+    bl = [x for x in blocks(client)["blocks"] if x["task_id"] == t["id"]]
+    assert bl and all(x["start"] < "2026-10-30" for x in bl)
+    plan = client.post("/api/replan").get_json()
+    assert any("Lab report starts earlier than usual" in w["message"] for w in plan["warnings"])
+
+
+def test_area_lead_days_and_not_yet(client):
+    cs = client.get("/api/courses").get_json()
+    c = (cs["courses"] if isinstance(cs, dict) else cs)[0]
+    client.patch(f"/api/courses/{c['id']}", json={"lead_days": 1})
+    t = client.post("/api/tasks", json={"title": "Lab", "due": "2026-11-02T17:00", "est_minutes": 60, "course_id": c["id"]}).get_json()["task"]
+    assert min(x["start"] for x in blocks(client)["blocks"] if x["task_id"] == t["id"]) >= "2026-11-01"
+
+    u = client.post("/api/tasks", json={"title": "Essay", "due": "2026-10-29T23:00", "est_minutes": 60}).get_json()["task"]
+    blk = next(x for x in blocks(client)["blocks"] if x["task_id"] == u["id"])
+    assert client.post(f"/api/blocks/{blk['id']}/not-yet", json={"until": "2026-10-31"}).status_code == 400  # after due
+    assert client.post(f"/api/blocks/{blk['id']}/not-yet", json={}).status_code == 200
+    assert all(x["start"] >= "2026-10-29" for x in blocks(client)["blocks"] if x["task_id"] == u["id"])

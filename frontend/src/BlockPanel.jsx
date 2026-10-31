@@ -9,17 +9,21 @@ const KIND = { work: "Work block", meeting: "Meeting (to fit in)", appointment: 
 // From the calendar (defer): changes are saved but not rebalanced until you press Rebalance.
 export default function BlockPanel({ block: b, ctx, onClose, defer = false }) {
   const [partial, setPartial] = useState(null);
+  const [later, setLater] = useState(false);
+  const [until, setUntil] = useState("");
   const [when, setWhen] = useState({ date: b.start.slice(0, 10), start: b.start.slice(11, 16), end: b.end.slice(11, 16) });
   const length = minutesBetween(b.start, b.end);
   const planned = b.status === "planned" || !b.status;
   const course = ctx.courseById[b.course_id];
 
   const q = defer ? "?replan=0" : "";
-  async function act(fn, msg) {
-    try { await fn(); ctx.notify(defer ? `${msg.split(".")[0]}. Press Rebalance when you're done` : msg); onClose(); ctx.refresh(); }
+  async function act(fn, msg, logOnly = false) {
+    try { await fn(); ctx.notify(defer && !logOnly ? `${msg.split(".")[0]}. Press Rebalance when you're done` : msg); onClose(); ctx.refresh(); }
     catch (e) { ctx.notify(e.message, "error"); }
   }
   const post = (path, body) => api.post(`/api/blocks/${b.id}/${path}${q}`, body);
+  const checkin = (body) => api.post(`/api/blocks/${b.id}/checkin`, body);   // logging work never needs a rebalance
+  const dueDay = b.due ? b.due.slice(0, 10) : "";
   const taskId = b.task_id;  // for a step, just that step
   function deleteTask() {
     if (!confirm(`Delete "${b.title}" and all of its planned time?`)) return;
@@ -51,15 +55,24 @@ export default function BlockPanel({ block: b, ctx, onClose, defer = false }) {
         <div>
           <div className="subhead">How did it go?</div>
           <div className="choices">
-            <button className="btn ok" onClick={() => act(() => post("checkin", { status: "done" }), "Nice. Logged it")}><Icon name="check" />Done</button>
+            <button className="btn ok" onClick={() => act(() => checkin({ status: "done" }), "Nice. Logged it", true)}><Icon name="check" />Done</button>
             <button className="btn" onClick={() => setPartial(partial === null ? Math.round(length / 2) : null)}>Partly done</button>
             <button className="btn" title="Free this slot. The work moves later, still before its deadline"
                     onClick={() => act(() => post("not-now"), "Moved later. This slot went to other work")}>Not now</button>
+            <button className="btn" title="It isn't open yet, or you don't know enough yet" onClick={() => setLater(!later)}>Not yet</button>
             <button className="btn danger" title="Delete the whole task, not just this block" onClick={deleteTask}><Icon name="trash" />Delete task</button>
           </div>
+          {later && (
+            <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
+              <span className="muted small">Don't start until</span>
+              <button className="btn sm" onClick={() => act(() => post("not-yet", {}), "Held back until a couple of days before it's due")}>A couple of days before it's due</button>
+              <input type="date" value={until} max={dueDay || undefined} onChange={(e) => setUntil(e.target.value)} aria-label="Start date" />
+              <button className="btn sm primary" disabled={!until} onClick={() => act(() => post("not-yet", { until }), "Held back until then")}>Set</button>
+            </div>
+          )}
           {partial !== null && (
             <form className="row" style={{ marginTop: 10 }}
-                  onSubmit={(e) => { e.preventDefault(); act(() => post("checkin", { status: "partial", minutes: Number(partial) }), "Got it. The rest is rescheduled"); }}>
+                  onSubmit={(e) => { e.preventDefault(); act(() => checkin({ status: "partial", minutes: Number(partial) }), "Got it. The rest is rescheduled", true); }}>
               <input type="number" min="0" max={length} value={partial} onChange={(e) => setPartial(e.target.value)} style={{ width: 80 }} autoFocus />
               <span className="muted small">of {length} min done</span>
               <button className="btn primary sm">Save</button>
@@ -70,7 +83,7 @@ export default function BlockPanel({ block: b, ctx, onClose, defer = false }) {
 
       {b.kind === "routine" && planned && b.category !== "class" && b.category !== "appointment" && (
         <div className="choices">
-          <button className="btn ok" onClick={() => act(() => post("checkin", { status: "done" }), "Done")}><Icon name="check" />Done</button>
+          <button className="btn ok" onClick={() => act(() => checkin({ status: "done" }), "Done", true)}><Icon name="check" />Done</button>
           <button className="btn" title="Skip for this day only. It's back tomorrow" onClick={() => act(() => post("skip"), "Skipped for today. That time is free now")}>Skip today</button>
         </div>
       )}
