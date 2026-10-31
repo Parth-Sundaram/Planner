@@ -4,6 +4,10 @@ import timeGridPlugin from "@fullcalendar/timegrid";
 import interactionPlugin from "@fullcalendar/interaction";
 import { api, minutesBetween, toLocalISO } from "./api.js";
 import { Icon, Seg, useStored } from "./ui.jsx";
+import { CATS, Sample, parseStyle, styleKey } from "./calstyle.jsx";
+
+const ZOOMS = ["Fit", "75%", "100%", "140%"];
+const KEYS = [["T", "Today"], ["← →", "Prev / next"], ["D", "Day view"], ["W", "Week view"], ["N", "New event"], ["R", "Rebalance"]];
 
 export default function Calendar({ ctx }) {
   const cal = useRef(null);
@@ -11,7 +15,9 @@ export default function Calendar({ ctx }) {
   const [data, setData] = useState({ blocks: [], events: [], dirty: false });
   const [zoom, setZoom] = useStored("cal.zoom", 2);   // 0 = fit the screen, 1-3 = taller hours
   const [busy, setBusy] = useState(false);
-  const [title, setTitle] = useState("");
+  const [title, setTitle] = useState({ month: "", range: "" });
+  const [menu, setMenu] = useState(false);
+  const [look, setLook] = useState(parseStyle());
   const [view, setView] = useStored("cal.view", window.innerWidth < 700 ? "timeGrid3Day" : "timeGridWeek");
   const [showRoutines, setShowRoutines] = useStored("cal.routines", true);
   const [newAppt, setNewAppt] = useState(null);   // {start, end}
@@ -23,10 +29,12 @@ export default function Calendar({ ctx }) {
       .then(setData).catch((e) => ctx.notify(e.message, "error"));
   }, [range, ctx.version]);
 
+  useEffect(() => { api.get("/api/settings").then((s) => setLook(parseStyle(s.calendar_style))).catch(() => {}); }, [ctx.version]);
+
   const events = [
     ...data.events.map((e) => ({ id: `e${e.id}`, start: e.start, end: e.end, title: e.title, editable: false,
       extendedProps: { block: { ...e, kind: "event" } } })),
-    ...data.blocks.filter((b) => showRoutines || b.kind === "task" || b.kind === "busy").map((b) => ({
+    ...data.blocks.filter((b) => showRoutines || b.category !== "routine").map((b) => ({
       id: `b${b.id}`, start: b.start, end: b.end, title: b.title,
       editable: b.status === "planned", extendedProps: { block: b },
     })),
@@ -79,16 +87,41 @@ export default function Calendar({ ctx }) {
     const mins = minutesBetween(b.start, b.end);
     const course = ctx.courseById[b.course_id];
     const cat = b.kind === "event" ? "event" : b.category || b.kind;
-    const cls = `ev ${b.kind} cat-${cat} ${b.status || ""} c-${course?.color || "blue"} ${mins < 30 ? "tiny" : ""} ${mins < 10 ? "sliver" : ""}`;
+    const s = look[styleKey(cat)];
+    const color = s.color === "course" ? course?.color || "blue" : s.color;
+    const when = arg.isPast ? "past" : arg.isFuture ? "" : "now";
+    const cls = `ev ${b.kind} cat-${cat} st-${s.style} ${b.status || ""} ${when} c-${color} ${mins < 30 ? "tiny" : ""} ${mins < 10 ? "sliver" : ""}`;
     return (
       <div className={cls} title={`${b.title} · ${arg.timeText}`}>
         {removal(b) && <button type="button" className="ev-del" title={removal(b).label} aria-label={removal(b).label}><Icon name={b.kind === "routine" ? "x" : "trash"} size={11} /></button>}
-        <span className="ev-t">{["appointment", "meeting", "class"].includes(cat) && <span className="ev-ico">{cat === "class" ? "▣" : "◆"}</span>}
+        <span className="ev-t">{["appointment", "meeting", "class"].includes(cat) && <i className={`ev-ico ${cat === "class" ? "sq" : "dia"}`} />}
           {b.title}{b.locked && cat === "work" && <span className="pin">●</span>}</span>
-        {mins >= 40 && <div className="ev-time">{arg.timeText}</div>}
+        {mins >= 40 && s.style !== "text" && <div className="ev-time">{arg.timeText}</div>}
       </div>
     );
   }
+
+  // Keyboard: T today, arrows prev/next, D day, W week, N new appointment, R rebalance.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest("input, textarea, select, [contenteditable]") || newAppt) return;
+      const k = e.key.toLowerCase();
+      if (k === "t") api_()?.today();
+      else if (k === "arrowleft") api_()?.prev();
+      else if (k === "arrowright") api_()?.next();
+      else if (k === "d") changeView("timeGridDay");
+      else if (k === "w") changeView("timeGridWeek");
+      else if (k === "r") rebalance();
+      else if (k === "n") {
+        const s = new Date(); s.setMinutes(0, 0, 0); s.setHours(s.getHours() + 1);
+        setNewAppt({ start: toLocalISO(s), end: toLocalISO(new Date(s.getTime() + 3600e3)) }); setApptTitle("");
+      } else if (k === "escape") setMenu(false);
+      else return;
+      e.preventDefault();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const api_ = () => cal.current?.getApi();
   const changeView = (v) => { setView(v); api_()?.changeView(v); };
@@ -96,26 +129,47 @@ export default function Calendar({ ctx }) {
   return (
     <div className="page wide">
       <div className="cal-tools">
-        <div className="row">
-          <h1 style={{ minWidth: 180 }}>{title}</h1>
-          <button className="btn sm" onClick={() => api_()?.today()}>Today</button>
-          <button className="icon-btn" onClick={() => api_()?.prev()} aria-label="Previous">‹</button>
-          <button className="icon-btn" onClick={() => api_()?.next()} aria-label="Next">›</button>
-        </div>
-        <div className="row">
-          <button className={`btn sm ${data.dirty ? "primary" : ""}`} onClick={rebalance} disabled={busy}
-                  title="Re-place the work the planner manages around everything you moved or pinned">
-            <Icon name="spark" size={14} />{busy ? "Rebalancing…" : "Rebalance"}{data.dirty && <span className="dot" />}
-          </button>
+        <div className="row" style={{ gap: 14 }}>
+          <h1>{title.month} <span className="cal-range">{title.range}</span></h1>
           <span className="row" style={{ gap: 2 }}>
-            <button className="icon-btn" onClick={() => setZoom(Math.max(0, zoom - 1))} disabled={zoom === 0} aria-label="Zoom out" title="Zoom out">−</button>
-            <button className="icon-btn" onClick={() => setZoom(Math.min(3, zoom + 1))} disabled={zoom === 3} aria-label="Zoom in" title="Zoom in">+</button>
+            <button className="icon-btn" onClick={() => api_()?.prev()} aria-label="Previous"><Icon name="chevron-left" size={14} /></button>
+            <button className="btn sm" onClick={() => api_()?.today()}>Today</button>
+            <button className="icon-btn" onClick={() => api_()?.next()} aria-label="Next"><Icon name="chevron-right" size={14} /></button>
           </span>
-          <label className="check-label muted"><input type="checkbox" checked={showRoutines} onChange={(e) => setShowRoutines(e.target.checked)} />Meals and routines</label>
+        </div>
+        <div className="row" style={{ gap: 8, position: "relative" }}>
+          {(data.dirty || busy) && (
+            <button className="btn sm primary pill" onClick={rebalance} disabled={busy}
+                    title="Re-place the work the planner manages around everything you moved or pinned (R)">
+              <Icon name="refresh" size={13} />{busy ? "Rebalancing…" : "Rebalance"}
+            </button>
+          )}
           <Seg value={view} onChange={changeView} options={[["timeGridDay", "Day"], ["timeGrid3Day", "3 days"], ["timeGridWeek", "Week"]]} />
+          <button className={`icon-btn ${menu ? "on" : ""}`} onClick={() => setMenu(!menu)} aria-label="Calendar options" aria-expanded={menu}><Icon name="dots" /></button>
+          {menu && (
+            <>
+              <div className="menu-backdrop" onClick={() => setMenu(false)} />
+              <div className="cal-menu">
+                <label className="cal-menu-row">Meals & routines<input type="checkbox" checked={showRoutines} onChange={(e) => setShowRoutines(e.target.checked)} /></label>
+                <div className="cal-menu-row">Zoom
+                  <span className="row" style={{ gap: 2 }}>
+                    <button className="icon-btn" onClick={() => setZoom(Math.max(0, zoom - 1))} disabled={zoom === 0} aria-label="Zoom out">−</button>
+                    <span className="zoom-val">{ZOOMS[zoom]}</span>
+                    <button className="icon-btn" onClick={() => setZoom(Math.min(3, zoom + 1))} disabled={zoom === 3} aria-label="Zoom in">+</button>
+                  </span>
+                </div>
+                <div className="sep" />
+                <div className="cal-menu-head">What the colors mean <a href="#/settings" onClick={() => setMenu(false)}>Change</a></div>
+                {CATS.map(([k, label]) => <div key={k} className="cal-menu-key"><Sample s={look[k]} />{label}</div>)}
+                <div className="sep" />
+                <div className="cal-menu-head">Shortcuts</div>
+                <div className="cal-keys">{KEYS.map(([k, l]) => <span key={k}><kbd>{k}</kbd>{l}</span>)}</div>
+                <div className="cal-menu-tip">Drag across empty time to add an appointment. Moved blocks stay pinned; nothing else moves until you rebalance.</div>
+              </div>
+            </>
+          )}
         </div>
       </div>
-      {data.dirty && <div className="dirty-bar">You've changed things here. The rest of the plan hasn't moved yet. <button className="btn sm primary" onClick={rebalance} disabled={busy}>Rebalance now</button></div>}
       <div className={`cal-wrap zoom-${zoom}`}>
         <FullCalendar
           ref={cal}
@@ -128,8 +182,11 @@ export default function Calendar({ ctx }) {
           slotMaxTime="24:00:00"
           scrollTime={`${String(Math.max(7, new Date().getHours() - 1)).padStart(2, "0")}:00:00`}
           slotDuration="00:30:00"
-          slotLabelFormat={{ hour: "numeric", meridiem: "short" }}
-          dayHeaderFormat={{ weekday: "short", day: "numeric" }}
+          slotLabelContent={(a) => { const h = a.date.getHours(); return `${(h + 11) % 12 + 1} ${h < 12 ? "AM" : "PM"}`; }}
+          dayHeaderContent={(a) => (
+            <span className="dh"><span className="dow">{a.date.toLocaleDateString([], { weekday: "short" }).toUpperCase()}</span>
+              <span className={`dn ${a.isToday ? "today" : ""}`}>{a.date.getDate()}</span></span>
+          )}
           nowIndicator
           eventMinHeight={2}
           allDaySlot={false}
@@ -144,7 +201,12 @@ export default function Calendar({ ctx }) {
           selectable
           selectMirror
           select={(info) => { setNewAppt({ start: toLocalISO(info.start), end: toLocalISO(info.end) }); setApptTitle(""); }}
-          datesSet={(arg) => { setRange({ start: arg.start, end: arg.end }); setTitle(arg.view.title); }}
+          datesSet={(arg) => {
+            setRange({ start: arg.start, end: arg.end });
+            const mid = new Date((arg.view.currentStart.getTime() + arg.view.currentEnd.getTime()) / 2);
+            setTitle({ month: mid.toLocaleDateString([], { month: "long", year: "numeric" }),
+              range: arg.view.title.replace(/, \d{4}$/, "") });
+          }}
         />
       </div>
       {newAppt && (
@@ -163,14 +225,6 @@ export default function Calendar({ ctx }) {
           </form>
         </div>
       )}
-      <div className="cal-legend">
-        <span><i className="lg work" />Work the planner placed</span>
-        <span><i className="lg appointment" />Meetings & appointments</span>
-        <span><i className="lg class" />Classes</span>
-        <span><i className="lg routine" />Meals & routines</span>
-        <span><i className="lg event" />Google Calendar</span>
-      </div>
-      <div className="hint"><Icon name="pin" size={12} /> Drag across empty time to add an appointment. Drag to move, drag the bottom edge to resize, hover for the delete button, click for more. Anything you move stays pinned, and nothing else moves until you press Rebalance.</div>
     </div>
   );
 }

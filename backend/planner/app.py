@@ -30,10 +30,11 @@ TASK_FIELDS = {"title", "course", "est_minutes", "done_minutes", "min_total_minu
                "repeat", "kind"}
 ROUTINE_FIELDS = {"title", "days", "window_start", "window_end", "duration", "kind", "active"}
 RULE_FIELDS = {"tag", "weekday", "time", "description"}
-SETTING_KEYS = {"timezone", "day_start", "day_end", "horizon_days", "busy_calendar_ids", "calorie_target", "protein_target"}
+SETTING_KEYS = {"timezone", "day_start", "day_end", "horizon_days", "busy_calendar_ids", "calorie_target", "protein_target",
+                "calendar_style"}
 COURSE_FIELDS = {"name", "url", "parser", "render_js", "class_days", "class_time", "enabled", "review",
                  "color", "instructor", "notes", "target_grade", "kind", "keywords",
-                 "attend_allowed", "attend_expected", "grade_policies"}
+                 "attend_allowed", "attend_expected", "grade_policies", "lead_days"}
 AREA_KINDS = {"course", "career", "fitness", "finance", "personal"}
 
 
@@ -98,7 +99,7 @@ def block_json(b: Block, tasks: dict | None = None, routines: dict | None = None
     return {"id": b.id, "title": b.title, "start": iso(b.start), "end": iso(b.end), "kind": b.kind,
             "task_id": b.task_id, "routine_id": b.routine_id, "locked": b.locked,
             "status": b.status, "done_minutes": b.done_minutes,
-            "course_id": t.course_id if t else None, "parent_task_id": t.parent_id if t else None,
+            "course_id": t.course_id if t else None, "parent_task_id": t.parent_id if t else None, "due": iso(t.due) if t else None,
             "category": category}
 
 
@@ -118,7 +119,7 @@ def course_json(c: Course) -> dict:
             "color": c.color, "instructor": c.instructor, "notes": c.notes,
             "links": json.loads(c.links or "[]"), "target_grade": c.target_grade,
             "kind": c.kind or "course", "keywords": c.keywords or "", "has_recipe": bool(c.recipe),
-            "attend_allowed": c.attend_allowed or 0, "attend_expected": c.attend_expected,
+            "attend_allowed": c.attend_allowed or 0, "attend_expected": c.attend_expected, "lead_days": c.lead_days,
             "grade_policies": c.grade_policies or "", "grade_scale": json.loads(c.grade_scale or "[]")}
 
 
@@ -463,6 +464,18 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
     @login_required
     def block_not_now(bid):
         return block_action(bid, service.not_now)
+
+    @app.post("/api/blocks/<int:bid>/not-yet")
+    @login_required
+    def block_not_yet(bid):
+        d = request.get_json(silent=True) or {}
+        until = None
+        if d.get("until"):
+            try:
+                until = datetime.fromisoformat(str(d["until"])[:10]).date()
+            except ValueError:
+                return jsonify(error="until must be a date like 2026-11-02"), 400
+        return block_action(bid, service.not_yet, until)
 
     @app.post("/api/blocks/<int:bid>/skip")
     @login_required

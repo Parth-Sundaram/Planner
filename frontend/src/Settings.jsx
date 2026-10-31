@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "./api.js";
+import { CATS, COLORS, STYLES, Sample, parseStyle } from "./calstyle.jsx";
 import { Icon } from "./ui.jsx";
 
 const DAYS = [["M", "Mon"], ["T", "Tue"], ["W", "Wed"], ["R", "Thu"], ["F", "Fri"], ["S", "Sat"], ["U", "Sun"]];
@@ -52,6 +53,8 @@ export default function Settings({ ctx }) {
           <label className="field inline">Protein / day (g)<input type="number" defaultValue={settings.protein_target || 150} onBlur={put("protein_target")} style={{ width: 90 }} /></label>
         </div>
       </div>
+
+      <CalendarLook raw={settings.calendar_style} act={act} />
 
       <MoodleCard ctx={ctx} />
 
@@ -250,4 +253,33 @@ function HealthStatus() {
   useEffect(() => { api.get("/api/health/status").then(setH).catch(() => {}); }, []);
   if (!h || !h.at) return <div className="faint">Nothing received from your phone yet.</div>;
   return <div className="muted">Last received {new Date(h.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}: {Object.entries(h.received || {}).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ") || "no new records"}.</div>;
+}
+
+// How each kind of block looks on the calendar.
+function CalendarLook({ raw, act }) {
+  const look = parseStyle(raw);
+  const save = (k, change) => act(() => api.put("/api/settings", { calendar_style: { ...look, [k]: { ...look[k], ...change } } }), "Saved");
+  return (
+    <div className="set-card">
+      <h3>Calendar look</h3>
+      <p className="muted small" style={{ margin: 0 }}>How each kind of block looks on the calendar.</p>
+      <div>
+        {CATS.map(([k, label]) => (
+          <div key={k} className="look-row">
+            <span className="name"><Sample s={look[k]} />{label}</span>
+            <select value={look[k].style} onChange={(e) => save(k, { style: e.target.value })} aria-label={`${label} style`}>
+              {STYLES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+            <span className="swatches">
+              {k === "work" && <button type="button" className={`swatch course ${look[k].color === "course" ? "on" : ""}`} title="Each course's own color"
+                                       onClick={() => save(k, { color: "course" })} aria-label="Course color" />}
+              {COLORS.map((c) => <button key={c} type="button" className={`swatch c-${c} ${look[k].color === c ? "on" : ""}`}
+                                         onClick={() => save(k, { color: c })} aria-label={c} />)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <button className="btn sm quiet" style={{ justifySelf: "start" }} onClick={() => act(() => api.put("/api/settings", { calendar_style: "" }), "Back to the default look")}>Reset to default</button>
+    </div>
+  );
 }

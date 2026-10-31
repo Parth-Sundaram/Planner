@@ -220,15 +220,11 @@ details.adv summary { cursor: pointer; color: var(--text-2); font-size: 13px; ma
 .fc .fc-timegrid-event-harness-inset .fc-timegrid-event { box-shadow: 0 0 0 1px var(--bg); }
 .fc .fc-event { border: 0; border-radius: 5px; cursor: pointer; background: transparent; }
 .fc .fc-event:focus::after { display: none; }
-.ev { height: 100%; overflow: hidden; border-radius: 5px; padding: 2px 6px 2px 7px; border-left: 3px solid var(--cc, var(--accent));
-  background: color-mix(in srgb, var(--cc, var(--accent)) 16%, var(--bg)); color: color-mix(in srgb, var(--cc, var(--accent)) 55%, var(--text)); line-height: 1.3; }
+.ev { height: 100%; overflow: hidden; border-radius: 6px; padding: 3px 7px; line-height: 1.3; color: var(--text); box-sizing: border-box; }
 .ev .ev-t { font-weight: 600; }
 .ev .ev-time { opacity: 0.8; font-size: 11px; }
 .ev.tiny { display: flex; gap: 6px; align-items: center; white-space: nowrap; padding-top: 0; padding-bottom: 0; font-size: 11px; }
 .ev.sliver { padding: 0; border-left-width: 0; } .ev.sliver .ev-t { display: none; }
-.ev.routine, .ev.busy { --cc: var(--c-gray); background: var(--hover); color: var(--text-2); border-left-color: var(--line-2); }
-.ev.routine .ev-t, .ev.busy .ev-t { font-weight: 500; }
-.ev.event { --cc: var(--c-gray); background: var(--bg); border: 1px solid var(--line-2); border-left: 3px solid var(--text-3); color: var(--text-2); }
 .ev.done { opacity: 0.55; } .ev.done .ev-t { text-decoration: line-through; }
 .ev.skipped { opacity: 0.4; background: repeating-linear-gradient(135deg, var(--hover) 0 6px, transparent 6px 12px); }
 .ev.skipped .ev-t { text-decoration: line-through; }
@@ -366,25 +362,10 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .habit .faint { white-space: nowrap; }
 
 /* Meetings, appointments and classes look different from work the planner placed */
-.ev.cat-appointment, .ev.cat-meeting { --cc: var(--c-purple); background: color-mix(in srgb, var(--c-purple) 22%, var(--bg)); border-left: 3px solid var(--c-purple);
-  color: color-mix(in srgb, var(--c-purple) 60%, var(--text)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c-purple) 45%, transparent); }
-.ev.cat-meeting { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c-purple) 18%, var(--bg)) 0 8px, color-mix(in srgb, var(--c-purple) 10%, var(--bg)) 8px 16px); }
-.ev.cat-class { --cc: var(--c-gray); color: var(--text); border-left: 3px solid var(--text);
-  background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--text) 7%, var(--bg)) 0 6px, color-mix(in srgb, var(--text) 12%, var(--bg)) 6px 12px); }
-.ev.cat-class .ev-t { font-weight: 600; }
-.ev .ev-ico { font-size: 9px; margin-right: 4px; opacity: 0.75; }
 .tl.cat-appointment .bar, .tl.cat-meeting .bar { background: var(--c-purple); }
 .tl.cat-class .bar { background: var(--text); }
 .tl.cat-appointment .ttl, .tl.cat-meeting .ttl, .tl.cat-class .ttl { font-weight: 500; color: var(--text); }
 .tag.meet { background: color-mix(in srgb, var(--c-purple) 14%, transparent); color: var(--c-purple); }
-.cal-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); margin-top: 8px; }
-.cal-legend span { display: inline-flex; align-items: center; gap: 6px; }
-.lg { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
-.lg.work { background: color-mix(in srgb, var(--c-blue) 25%, var(--bg)); border-left: 3px solid var(--c-blue); }
-.lg.appointment { background: color-mix(in srgb, var(--c-purple) 25%, var(--bg)); border-left: 3px solid var(--c-purple); }
-.lg.class { background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--text) 7%, var(--bg)) 0 3px, color-mix(in srgb, var(--text) 14%, var(--bg)) 3px 6px); border-left: 3px solid var(--text); }
-.lg.routine { background: var(--hover); border-left: 3px solid var(--line-2); }
-.lg.event { background: var(--bg); border: 1px solid var(--line-2); border-left: 3px solid var(--text-3); }
 .fc .fc-highlight { background: color-mix(in srgb, var(--c-purple) 15%, transparent); }
 
 /* Calendar zoom: 0 fits the whole day on screen, 1-3 make each hour taller (the grid scrolls) */
@@ -411,3 +392,54 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   padding: 7px 10px; margin-bottom: 10px; border-radius: var(--radius); font-size: 13px;
   background: color-mix(in srgb, var(--warn) 11%, transparent); color: color-mix(in srgb, var(--warn) 60%, var(--text)); }
 .btn .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-left: 2px; }
+
+/* Calendar block styles (picked per kind in Settings → Calendar look) */
+.ev.st-soft, .ev-sample.st-soft { background: color-mix(in srgb, var(--cc) 14%, var(--bg)); color: color-mix(in srgb, var(--cc) 62%, var(--text)); }
+.ev.st-outline, .ev-sample.st-outline { background: var(--bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cc) 45%, var(--line-2)); color: var(--text); }
+.ev.st-solid, .ev-sample.st-solid { background: var(--cc); color: #fff; }
+.ev.st-striped, .ev-sample.st-striped { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--cc) 18%, var(--bg)) 0 6px, color-mix(in srgb, var(--cc) 8%, var(--bg)) 6px 12px);
+  color: color-mix(in srgb, var(--cc) 62%, var(--text)); }
+.ev.st-text, .ev-sample.st-text { background: transparent; border-radius: 0; border-left: 2px solid color-mix(in srgb, var(--cc) 35%, var(--line-2)); color: var(--text-2); }
+.ev.st-text { padding: 1px 7px; } .ev.st-text .ev-t { font-weight: 500; font-size: 11.5px; }
+.ev-sample { display: inline-block; flex: none; width: 20px; height: 13px; border-radius: 3px; box-sizing: border-box; }
+.ev .ev-ico { display: inline-block; width: 6px; height: 6px; margin: 0 5px 1px 0; background: var(--cc); vertical-align: middle; }
+.ev .ev-ico.dia { transform: rotate(45deg); } .ev .ev-ico.sq { border-radius: 1px; }
+.ev.st-solid .ev-ico { background: #fff; }
+.ev.past:not(.done):not(.skipped) { opacity: 0.5; }
+.ev.now { box-shadow: 0 0 0 2px var(--accent); } .ev.st-outline.now { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cc) 45%, var(--line-2)), 0 0 0 2px var(--accent); }
+.ev.tiny .ev-ico { margin-bottom: 0; }
+
+/* Calendar header, menu, day headers */
+.cal-tools h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+.cal-range { font-size: 14px; font-weight: 400; color: var(--text-2); letter-spacing: 0; margin-left: 4px; }
+.btn.pill { border-radius: 999px; }
+.icon-btn.on { background: var(--active); color: var(--text); }
+.menu-backdrop { position: fixed; inset: 0; z-index: 19; }
+.cal-menu { position: absolute; right: 0; top: 36px; z-index: 20; width: 280px; background: var(--surface); border-radius: var(--radius);
+  box-shadow: 0 0 0 1px var(--line), var(--shadow); padding: 6px; display: grid; gap: 1px; font-size: 13px; }
+.cal-menu-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 5px; }
+label.cal-menu-row { cursor: pointer; } label.cal-menu-row:hover { background: var(--hover); }
+.cal-menu-row input { margin: 0; }
+.zoom-val { min-width: 42px; text-align: center; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.cal-menu .sep { height: 1px; background: var(--line); margin: 4px 2px; }
+.cal-menu-head { display: flex; justify-content: space-between; font-size: 11.5px; font-weight: 500; color: var(--text-2); padding: 4px 8px 2px; }
+.cal-menu-head a { font-weight: 500; text-decoration: none; }
+.cal-menu-key { display: flex; align-items: center; gap: 8px; padding: 3px 8px; color: var(--text-2); font-size: 12.5px; }
+.cal-keys { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 10px; padding: 4px 8px 6px; font-size: 12px; color: var(--text-2); }
+.cal-keys span { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+kbd { min-width: 18px; text-align: center; font: 500 11px var(--font); padding: 1px 4px; border-radius: 4px; background: var(--hover); box-shadow: inset 0 -1px 0 var(--line-2); color: var(--text); }
+.cal-menu-tip { font-size: 12px; color: var(--text-3); padding: 4px 8px 6px; line-height: 1.4; }
+.dh { display: inline-flex; align-items: center; gap: 6px; }
+.dh .dow { font-size: 11px; font-weight: 500; letter-spacing: 0.04em; color: var(--text-2); }
+.dh .dn { font-size: 16px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.dh .dn.today { color: #fff; background: var(--accent); border-radius: 999px; min-width: 26px; height: 26px; display: inline-grid; place-items: center; font-size: 13.5px; }
+.fc .fc-day-today .dh .dow { color: var(--accent); }
+.fc .fc-day-sat, .fc .fc-day-sun { background: color-mix(in srgb, var(--text) 1.5%, transparent); }
+.fc .fc-day-today { background: transparent; }
+.fc .fc-timegrid-slot-label-cushion { font-variant-numeric: tabular-nums; font-size: 10.5px; }
+
+/* Settings → Calendar look */
+.look-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; }
+.look-row .name { flex: 1 1 180px; display: flex; align-items: center; gap: 8px; }
+.look-row .ev-sample { width: 34px; height: 18px; border-radius: 4px; }
+.swatch.course { background: conic-gradient(var(--c-blue) 0 25%, var(--c-orange) 0 50%, var(--c-teal) 0 75%, var(--c-purple) 0); }
