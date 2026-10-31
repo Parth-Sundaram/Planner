@@ -136,6 +136,7 @@ class Course(Base):
     grade_policies: Mapped[str] = mapped_column(Text, default="")     # notes pulled from the syllabus (late work, rounding...)
     attend_allowed: Mapped[int] = mapped_column(Integer, default=0)   # absences that don't cost anything
     attend_expected: Mapped[int | None] = mapped_column(Integer)      # class meetings in the term, if known
+    lead_days: Mapped[int | None] = mapped_column(Integer)           # start work at most this many days before it's due (None = by size)
 
 
 class GradeCategory(Base):

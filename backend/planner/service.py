@@ -5,6 +5,7 @@ import contextvars
 import json
 import re
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -12,7 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from . import scheduler as S
-from .models import DEFAULT_SETTINGS, Block, ExternalEvent, Routine, Rule, Setting, Task
+from .models import DEFAULT_SETTINGS, Block, Course, ExternalEvent, Routine, Rule, Setting, Task
 
 
 # ---- Settings & time ----------------------------------------------------------
@@ -81,6 +82,22 @@ def prep_window(t: Task, day_start: time, now: datetime) -> tuple[datetime | Non
 
 
 # ---- Replanning ----------------------------------------------------------------
+
+# Work isn't started too far ahead of its deadline (you may not know enough yet, or it isn't
+# open). By size: (up to minutes, days ahead). An area can set its own number of days.
+LEAD_DAYS = [(60, 2), (180, 4), (10 ** 9, 7)]
+
+
+def lead_days(t: Task, area_lead: int | None) -> int | None:
+    if area_lead is not None:
+        return area_lead if area_lead > 0 else None   # 0 turns the window off for that area
+    return next(d for limit, d in LEAD_DAYS if t.est_minutes <= limit)
+
+
+def start_window(t: Task, eff_due: datetime, day_start: time, area_lead: int | None) -> datetime | None:
+    days = lead_days(t, area_lead)
+    return datetime.combine(eff_due.date() - timedelta(days=days), day_start) if days else None
+
 
 def _rules(db: Session) -> list[dict]:
     return [{"tag": r.tag.lower().lstrip("#"), "weekday": r.weekday, "time": hm(r.time)} for r in db.scalars(select(Rule))]
@@ -187,6 +204,8 @@ def replan(db: Session, now: datetime | None = None) -> dict:
         return max(0, t.est_minutes - t.done_minutes - placed), placed
 
     specs = []
+    windows: dict[int, tuple[datetime | None, datetime]] = {}   # task id -> (start without the window, window start)
+    area_lead = {c.id: c.lead_days for c in db.scalars(select(Course))}
     day_start_t = hm(cfg["day_start"])
     for t in open_tasks:
         if t.id in children:
@@ -203,18 +222,34 @@ def replan(db: Session, now: datetime | None = None) -> dict:
             for sib in children.get(parent.id, []):
                 if sib.position > t.position:
                     eff = min(eff, S.effective_due(sib.due, list(dict.fromkeys(sib.tag_list + parent.tag_list)), rules))
+        base_start = prep_window(t, day_start_t, now)[0] or (parent.earliest_start if parent else None)
+        start = base_start
+        if not t.confidence:  # study prep already has its own window
+            win = start_window(t, eff, day_start_t, area_lead.get(t.course_id))
+            if win and win > now and (base_start is None or win > base_start):
+                windows[t.id] = (base_start, win)
+                start = win
         specs.append(S.TaskSpec(
             id=t.id, title=f"{parent.title} › {t.title}" if parent else t.title,
             remaining=remaining, due=t.due, effective_due=eff, priority=priority,
             splittable=t.splittable and (t.kind or "work") != "meeting", min_block=t.min_block, max_block=t.max_block,
             min_total=(max(0, t.min_total_minutes - t.done_minutes - placed)
                        if t.min_total_minutes is not None else None),
-            earliest_start=prep_window(t, day_start_t, now)[0] or (parent.earliest_start if parent else None),
+            earliest_start=start,
             group=parent.id if parent else None, seq=t.position, sequential=sequential,
             max_per_day=prep_window(t, day_start_t, now)[1]))
 
     result = S.plan(now, horizon_end, hm(cfg["day_start"]), hm(cfg["day_end"]),
-                    busy, routines, specs, routine_skip)
+                    list(busy), routines, specs, routine_skip)
+    # Something doesn't fit inside its window: let those start earlier rather than miss the deadline.
+    relax = {tid for tid in result.shortfall if tid in windows}
+    if relax:
+        specs = [replace(sp, earliest_start=windows[sp.id][0]) if sp.id in relax else sp for sp in specs]
+        result = S.plan(now, horizon_end, hm(cfg["day_start"]), hm(cfg["day_end"]),
+                        list(busy), routines, specs, routine_skip)
+        for tid in relax:
+            result.warnings.append(S.Warning(
+                "info", f"{by_id[tid].title} starts earlier than usual (before {S.fmt_dt(windows[tid][1])}) so it fits", tid))
 
     for b in result.blocks:
         db.add(Block(title=b.title, start=b.start, end=b.end, kind=b.kind,
@@ -365,6 +400,26 @@ def unlock_block(db: Session, block_id: int) -> None:
     b = db.get(Block, block_id)
     b.locked = False
     replan(db)
+
+
+def not_yet(db: Session, block_id: int, until: date | None = None) -> Task:
+    """Don't work on this task yet (not open, or you don't know enough). Its planned time is
+    dropped and it won't be scheduled before `until`, or a couple of days before it's due."""
+    b = db.get(Block, block_id)
+    if b is None or b.kind != "task":
+        raise ValueError("Not yet only applies to work blocks")
+    t = db.get(Task, b.task_id)
+    now = local_now(db)
+    day_start = hm(get_settings(db)["day_start"])
+    if until is None:
+        until = max(t.due.date() - timedelta(days=2), now.date() + timedelta(days=1))
+    if until > t.due.date():
+        raise ValueError("that's after it's due")
+    t.earliest_start = datetime.combine(until, day_start)
+    for x in db.scalars(select(Block).where(Block.task_id == t.id, Block.status == "planned", Block.start >= now)):
+        db.delete(x)  # pinned ones too: you said not yet
+    replan(db)
+    return t
 
 
 def not_now(db: Session, block_id: int) -> None:
