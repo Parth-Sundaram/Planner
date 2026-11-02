@@ -37,8 +37,10 @@ $("f").addEventListener("submit", async (e) => {
     const body = { text: $("text").value, notes: $("notes").value };
     if ($("area").value) body.course_id = Number($("area").value);
     const r = await call("/api/tasks", { method: "POST", body: JSON.stringify(body) });
-    const due = new Date(r.task.due).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-    $("msg").textContent = `Added "${r.task.title}", due ${due}. It's scheduled.`;
+    const fmt = (iso) => new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    // A time range ("Dentist Thu 2-3pm") becomes an appointment instead of a task.
+    $("msg").textContent = r.appointment ? `Added appointment "${r.appointment.title}", ${fmt(r.appointment.start)}.`
+      : `Added "${r.task.title}", due ${fmt(r.task.due)}. It's scheduled.`;
     $("msg").className = "msg ok";
     setTimeout(() => window.close(), 1600);
   } catch (err) {
