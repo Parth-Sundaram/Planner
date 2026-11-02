@@ -87,3 +87,16 @@ def test_area_lead_days_and_not_yet(client):
     assert client.post(f"/api/blocks/{blk['id']}/not-yet", json={"until": "2026-10-31"}).status_code == 400  # after due
     assert client.post(f"/api/blocks/{blk['id']}/not-yet", json={}).status_code == 200
     assert all(x["start"] >= "2026-10-29" for x in blocks(client)["blocks"] if x["task_id"] == u["id"])
+
+
+def test_keep_free_slot_stays_empty_and_pins_can_be_undone(client):
+    r = client.post("/api/appointments", json={"title": "Keep free", "kind": "free", "start": "2026-10-28T08:00", "end": "2026-10-28T12:00"})
+    assert r.status_code == 201 and r.get_json()["appointment"]["kind"] == "busy"
+    t = client.post("/api/tasks", json={"title": "Essay", "due": "2026-10-29T17:00", "est_minutes": 60, "priority": 1}).get_json()["task"]
+    blk = next(x for x in blocks(client)["blocks"] if x["task_id"] == t["id"])
+    assert blk["start"] >= "2026-10-28T12:00" and blk["priority"] == 1
+    client.patch(f"/api/blocks/{blk['id']}", json={"start": "2026-10-29T09:00", "end": "2026-10-29T10:00"})
+    assert next(x for x in blocks(client)["blocks"] if x["id"] == blk["id"])["locked"]
+    client.post(f"/api/blocks/{blk['id']}/unlock?replan=0")
+    d = blocks(client)
+    assert d["dirty"] and not next(x for x in d["blocks"] if x["id"] == blk["id"])["locked"]

@@ -141,3 +141,25 @@ def test_no_sliver_left_over_after_long_chunks():
     r = plan(now, now + timedelta(days=3), time(8), time(23), [], [], [t])
     lengths = sorted(int((b.end - b.start).total_seconds() // 60) for b in r.blocks)
     assert sum(lengths) == 185 and min(lengths) >= 30
+
+
+def test_priority_takes_spare_time_and_low_priority_gives_way():
+    from datetime import datetime, time
+    from planner import scheduler as S
+    now = datetime(2026, 11, 4, 9, 0)
+    end = datetime(2026, 11, 5, 0, 0)
+
+    def spec(i, title, due, minutes, prio):
+        return S.TaskSpec(id=i, title=title, remaining=minutes, due=due, effective_due=due, priority=prio, min_block=30)
+
+    # Plenty of room: high priority due later still gets the first slot.
+    r = S.plan(now, end, time(9), time(17), [], [], [spec(1, "Normal", datetime(2026, 11, 4, 16), 60, 2),
+                                                   spec(2, "High", datetime(2026, 11, 4, 17), 60, 1)])
+    first = min(r.blocks, key=lambda b: b.start)
+    assert first.task_id == 2 and not r.shortfall
+
+    # Too much: the low-priority task is the one left short, even though it's due first.
+    r = S.plan(now, end, time(9), time(11), [], [], [spec(1, "Low", datetime(2026, 11, 4, 10, 30), 90, 3),
+                                                   spec(2, "Normal", datetime(2026, 11, 4, 11), 90, 2)])
+    assert r.shortfall == {1: 90}
+    assert any("low priority" in w.message for w in r.warnings)

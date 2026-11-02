@@ -443,3 +443,13 @@ kbd { min-width: 18px; text-align: center; font: 500 11px var(--font); padding: 
 .look-row .name { flex: 1 1 180px; display: flex; align-items: center; gap: 8px; }
 .look-row .ev-sample { width: 34px; height: 18px; border-radius: 4px; }
 .swatch.course { background: conic-gradient(var(--c-blue) 0 25%, var(--c-orange) 0 50%, var(--c-teal) 0 75%, var(--c-purple) 0); }
+.modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: rgb(15 15 15 / 0.28); }
+.modal > .box { box-shadow: var(--shadow); }
+.ev.mirror { opacity: 0.9; }
+.ev-pin { position: absolute; top: 2px; right: 2px; z-index: 2; display: grid; place-items: center; width: 18px; height: 18px; padding: 0;
+  border: 0; border-radius: 4px; cursor: pointer; background: color-mix(in srgb, var(--surface) 70%, transparent); color: inherit; opacity: 0.8; }
+.ev-pin:hover { opacity: 1; background: var(--surface); box-shadow: 0 0 0 1px var(--line-2); }
+.fc-event:hover .ev-pin { right: 24px; }
+.ev.tiny .ev-pin { top: 50%; transform: translateY(-50%); width: 15px; height: 15px; }
+.ev-flag { display: inline-grid; place-items: center; width: 13px; height: 13px; margin-right: 4px; border-radius: 3px; vertical-align: 1px;
+  font-size: 10px; font-weight: 700; line-height: 1; background: var(--danger); color: #fff; }

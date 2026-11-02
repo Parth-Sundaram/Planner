@@ -6,6 +6,7 @@ export const CATS = [
   ["appointment", "Meetings & appointments"],
   ["class", "Classes"],
   ["routine", "Meals & routines"],
+  ["busy", "Kept free / blocked"],
   ["event", "Google Calendar"],
 ];
 export const STYLES = [["soft", "Soft fill"], ["outline", "Outline"], ["solid", "Solid"], ["striped", "Striped"], ["text", "Text only"]];
@@ -15,6 +16,7 @@ export const DEFAULT_STYLE = {
   appointment: { style: "outline", color: "purple" },
   class: { style: "soft", color: "gray" },
   routine: { style: "text", color: "gray" },
+  busy: { style: "striped", color: "gray" },
   event: { style: "outline", color: "gray" },
 };
 
@@ -27,7 +29,6 @@ export function parseStyle(raw) {
 // Block category → which style entry it uses.
 export function styleKey(cat) {
   if (cat === "meeting") return "appointment";
-  if (cat === "busy") return "event";
   return CATS.some(([k]) => k === cat) ? cat : "work";
 }
 

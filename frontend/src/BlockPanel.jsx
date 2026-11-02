@@ -22,6 +22,7 @@ export default function BlockPanel({ block: b, ctx, onClose, defer = false }) {
     catch (e) { ctx.notify(e.message, "error"); }
   }
   const post = (path, body) => api.post(`/api/blocks/${b.id}/${path}${q}`, body);
+  const moveNow = (path, body) => api.post(`/api/blocks/${b.id}/${path}`, body);  // you want to see where the work went
   const checkin = (body) => api.post(`/api/blocks/${b.id}/checkin`, body);   // logging work never needs a rebalance
   const dueDay = b.due ? b.due.slice(0, 10) : "";
   const taskId = b.task_id;  // for a step, just that step
@@ -58,16 +59,16 @@ export default function BlockPanel({ block: b, ctx, onClose, defer = false }) {
             <button className="btn ok" onClick={() => act(() => checkin({ status: "done" }), "Nice. Logged it", true)}><Icon name="check" />Done</button>
             <button className="btn" onClick={() => setPartial(partial === null ? Math.round(length / 2) : null)}>Partly done</button>
             <button className="btn" title="Free this slot. The work moves later, still before its deadline"
-                    onClick={() => act(() => post("not-now"), "Moved later. This slot went to other work")}>Not now</button>
+                    onClick={() => act(() => moveNow("not-now"), "Moved later. This slot went to other work", true)}>Not now</button>
             <button className="btn" title="It isn't open yet, or you don't know enough yet" onClick={() => setLater(!later)}>Not yet</button>
             <button className="btn danger" title="Delete the whole task, not just this block" onClick={deleteTask}><Icon name="trash" />Delete task</button>
           </div>
           {later && (
             <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
               <span className="muted small">Don't start until</span>
-              <button className="btn sm" onClick={() => act(() => post("not-yet", {}), "Held back until a couple of days before it's due")}>A couple of days before it's due</button>
+              <button className="btn sm" onClick={() => act(() => moveNow("not-yet", {}), "Held back until a couple of days before it's due", true)}>A couple of days before it's due</button>
               <input type="date" value={until} max={dueDay || undefined} onChange={(e) => setUntil(e.target.value)} aria-label="Start date" />
-              <button className="btn sm primary" disabled={!until} onClick={() => act(() => post("not-yet", { until }), "Held back until then")}>Set</button>
+              <button className="btn sm primary" disabled={!until} onClick={() => act(() => moveNow("not-yet", { until }), "Held back until then", true)}>Set</button>
             </div>
           )}
           {partial !== null && (

@@ -100,6 +100,7 @@ def block_json(b: Block, tasks: dict | None = None, routines: dict | None = None
             "task_id": b.task_id, "routine_id": b.routine_id, "locked": b.locked,
             "status": b.status, "done_minutes": b.done_minutes,
             "course_id": t.course_id if t else None, "parent_task_id": t.parent_id if t else None, "due": iso(t.due) if t else None,
+            "priority": t.priority if t else None,
             "category": category}
 
 
@@ -500,7 +501,12 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
         if not d.get("title") or not start or not end:
             return jsonify(error="title, start and end are required"), 400
         try:
-            blk = service.add_appointment(g.db, d["title"].strip()[:300], start, end)
+            if d.get("kind") == "free":  # keep this time empty: nothing gets planned in it
+                if end <= start:
+                    raise ValueError("end must be after start")
+                blk = service.block_time(g.db, start, int((end - start).total_seconds() // 60), d["title"].strip()[:300])
+            else:
+                blk = service.add_appointment(g.db, d["title"].strip()[:300], start, end)
         except ValueError as e:
             return jsonify(error=str(e)), 400
         return jsonify(appointment=block_json(blk)), 201

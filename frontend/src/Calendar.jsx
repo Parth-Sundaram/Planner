@@ -73,6 +73,11 @@ export default function Calendar({ ctx }) {
 
   async function onClick(info) {
     const b = info.event.extendedProps.block;
+    if (info.jsEvent.target.closest?.(".ev-pin")) {
+      try { await api.post(`/api/blocks/${b.id}/unlock?replan=0`); ctx.notify("Unpinned. Press Rebalance to let the planner move it"); ctx.refresh(); }
+      catch (e) { ctx.notify(e.message, "error"); }
+      return;
+    }
     if (info.jsEvent.target.closest?.(".ev-del")) {
       const r = removal(b);
       try { if (r && (await r.run()) !== false) { ctx.notify(`${r.msg}. Press Rebalance when you're done`); ctx.refresh(); } }
@@ -84,6 +89,7 @@ export default function Calendar({ ctx }) {
 
   function renderEvent(arg) {
     const b = arg.event.extendedProps.block;
+    if (!b) return <div className="ev st-outline c-purple mirror"><span className="ev-t">New appointment</span><div className="ev-time">{arg.timeText}</div></div>;  // drag-select preview
     const mins = minutesBetween(b.start, b.end);
     const course = ctx.courseById[b.course_id];
     const cat = b.kind === "event" ? "event" : b.category || b.kind;
@@ -95,7 +101,11 @@ export default function Calendar({ ctx }) {
       <div className={cls} title={`${b.title} · ${arg.timeText}`}>
         {removal(b) && <button type="button" className="ev-del" title={removal(b).label} aria-label={removal(b).label}><Icon name={b.kind === "routine" ? "x" : "trash"} size={11} /></button>}
         <span className="ev-t">{["appointment", "meeting", "class"].includes(cat) && <i className={`ev-ico ${cat === "class" ? "sq" : "dia"}`} />}
-          {b.title}{b.locked && cat === "work" && <span className="pin">●</span>}</span>
+          {b.priority === 1 && cat === "work" && <span className="ev-flag" title="High priority">!</span>}
+          {b.title}</span>
+        {b.locked && b.status === "planned" && (b.kind === "task" || (b.kind === "routine" && cat === "routine")) && (
+          <button type="button" className="ev-pin" title="Pinned here. Click to unpin" aria-label="Unpin"><Icon name="pin" size={11} /></button>
+        )}
         {mins >= 40 && s.style !== "text" && <div className="ev-time">{arg.timeText}</div>}
       </div>
     );
@@ -200,7 +210,11 @@ export default function Calendar({ ctx }) {
           eventClick={onClick}
           selectable
           selectMirror
-          select={(info) => { setNewAppt({ start: toLocalISO(info.start), end: toLocalISO(info.end) }); setApptTitle(""); }}
+          select={(info) => {
+            // A plain click selects one 5-minute snap; treat it as "an hour starting here".
+            const end = info.end - info.start < 15 * 60e3 ? new Date(info.start.getTime() + 3600e3) : info.end;
+            setNewAppt({ start: toLocalISO(info.start), end: toLocalISO(end) }); setApptTitle("");
+          }}
           datesSet={(arg) => {
             setRange({ start: arg.start, end: arg.end });
             const mid = new Date((arg.view.currentStart.getTime() + arg.view.currentEnd.getTime()) / 2);
@@ -209,22 +223,50 @@ export default function Calendar({ ctx }) {
           }}
         />
       </div>
-      {newAppt && (
-        <div className="modal" onClick={() => { setNewAppt(null); api_()?.unselect(); }}>
-          <form className="box pad stack" style={{ width: "min(380px, 100%)", gap: 10, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()}
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  if (!apptTitle.trim()) return;
-                  try { await api.post("/api/appointments?replan=0", { title: apptTitle, ...newAppt }); ctx.notify("Added. Press Rebalance to fit the plan around it"); setNewAppt(null); ctx.refresh(); }
-                  catch (err) { ctx.notify(err.message, "error"); }
-                }}>
-            <b>New appointment</b>
-            <div className="muted small">{new Date(newAppt.start).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} – {new Date(newAppt.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>
-            <input autoFocus value={apptTitle} onChange={(e) => setApptTitle(e.target.value)} placeholder="Meeting with Rishi, dentist, office hours…" />
-            <div className="row end"><button type="button" className="btn quiet" onClick={() => setNewAppt(null)}>Cancel</button><button className="btn primary">Add</button></div>
-          </form>
+      {newAppt && <NewAppointment slot={newAppt} title={apptTitle} setTitle={setApptTitle} ctx={ctx}
+                                  onClose={() => { setNewAppt(null); api_()?.unselect(); }} />}
+    </div>
+  );
+}
+
+const LENGTHS = [[15, "15m"], [30, "30m"], [45, "45m"], [60, "1h"], [90, "1.5h"], [120, "2h"]];
+
+function NewAppointment({ slot, title, setTitle, ctx, onClose }) {
+  const [day, setDay] = useState(slot.start.slice(0, 10));
+  const [start, setStart] = useState(slot.start.slice(11, 16));
+  const [mins, setMins] = useState(minutesBetween(slot.start, slot.end));
+  const [kind, setKind] = useState("appointment");
+  const at = (hm, add = 0) => { const d = new Date(`${day}T${hm}`); d.setMinutes(d.getMinutes() + add); return d; };
+  const end = toLocalISO(at(start, mins)).slice(11, 16);
+
+  async function submit(e) {
+    e.preventDefault();
+    const name = title.trim() || (kind === "free" ? "Keep free" : "");
+    if (!name) return;
+    try {
+      await api.post("/api/appointments?replan=0", { title: name, kind, start: toLocalISO(at(start)), end: toLocalISO(at(start, mins)) });
+      ctx.notify(kind === "free" ? "That time stays empty. Press Rebalance to move anything planned there" : "Added. Press Rebalance to fit the plan around it");
+      onClose(); ctx.refresh();
+    } catch (err) { ctx.notify(err.message, "error"); }
+  }
+  return (
+    <div className="modal" onClick={onClose}>
+      <form className="box pad stack" style={{ width: "min(460px, 100%)", gap: 10, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <Seg value={kind} onChange={setKind} options={[["appointment", "Appointment"], ["free", "Keep this time free"]]} />
+        <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)}
+               placeholder={kind === "free" ? "Why (optional): rest, buffer, gaming…" : "Meeting with Rishi, dentist, office hours…"} />
+        <div className="row" style={{ flexWrap: "wrap" }}>
+          <input type="date" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Date" />
+          <input type="time" value={start} onChange={(e) => setStart(e.target.value)} aria-label="Start" />
+          <span className="faint">–</span>
+          <input type="time" value={end} aria-label="End"
+                 onChange={(e) => { const m = (at(e.target.value) - at(start)) / 60e3; if (m > 0) setMins(m); }} />
         </div>
-      )}
+        <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+          {LENGTHS.map(([m, l]) => <button key={m} type="button" className={`btn sm ${mins === m ? "primary" : "quiet"}`} onClick={() => setMins(m)}>{l}</button>)}
+        </div>
+        <div className="row end"><button type="button" className="btn quiet" onClick={onClose}>Cancel</button><button className="btn primary">Add</button></div>
+      </form>
     </div>
   );
 }

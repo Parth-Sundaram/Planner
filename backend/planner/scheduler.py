@@ -260,13 +260,24 @@ def _allocate(task: TaskSpec, minutes: int, deadline: datetime, now: datetime,
     return blocks, left, free
 
 
+# Orders to try, best first. Whichever leaves the least important work short wins; on a tie the
+# earlier one does, so spare time goes to high priority and deadline order is the safety net.
+ORDERS = [
+    lambda t: (t.priority, t.effective_due, t.seq, -t.remaining),            # priority, then deadline
+    lambda t: (t.priority != 1, t.effective_due, t.seq, -t.remaining),       # just high priority first
+    lambda t: (t.priority == 3, t.effective_due, t.seq, -t.remaining),       # deadline order, low priority last
+    lambda t: (t.effective_due, t.priority, t.seq, -t.remaining),            # plain deadline order
+]
+SHORT_WEIGHT = {1: 100, 2: 10, 3: 1}
+
+
 def _schedule_tasks(tasks: list[TaskSpec], now: datetime, free: list[Interval],
-                    amounts: dict[int, int]) -> tuple[list[PlannedBlock], dict[int, int], dict[int, int], list[Interval]]:
-    """One EDF pass. Returns blocks, shortfall vs soft deadline, spill-over used, remaining free."""
+                    amounts: dict[int, int], key=ORDERS[-1]) -> tuple[list[PlannedBlock], dict[int, int], dict[int, int], list[Interval]]:
+    """One greedy pass in the given order. Returns blocks, shortfall vs soft deadline, spill-over used, remaining free."""
     blocks: list[PlannedBlock] = []
     short_soft: dict[int, int] = {}
     short_hard: dict[int, int] = {}
-    order = sorted(tasks, key=lambda t: (t.effective_due, t.priority, t.seq, -t.remaining))
+    order = sorted(tasks, key=key)
     group_end: dict[int, datetime] = {}  # last scheduled minute of each sequential parent so far
     for t in order:
         want = amounts[t.id]
@@ -310,14 +321,23 @@ def plan(now: datetime, horizon_end: datetime, day_start: time, day_end: time,
     tasks = [t for t in tasks if t.due > now]
 
     amounts = {t.id: t.remaining for t in tasks}
-    blocks, short_soft, short_hard, _ = _schedule_tasks(tasks, now, list(free), amounts)
+    by_id = {t.id: t for t in tasks}
+
+    def cost(hard: dict[int, int]) -> int:  # work due after the planning window doesn't count
+        return sum(left * SHORT_WEIGHT.get(by_id[tid].priority, 10) for tid, left in hard.items() if by_id[tid].due <= horizon_end)
+    best = None
+    for key in ORDERS:
+        attempt = _schedule_tasks(tasks, now, list(free), amounts, key)
+        if best is None or cost(attempt[2]) < cost(best[0][2]):
+            best = (attempt, key)
+    (blocks, short_soft, short_hard, _), key = best
 
     if short_hard:
         # Pass 2: compress everything that allows it, then try again from scratch.
         compressed = {t.id: t.min_total for t in tasks if t.min_total is not None and t.min_total < t.remaining}
         if compressed:
             amounts2 = {t.id: compressed.get(t.id, t.remaining) for t in tasks}
-            blocks2, soft2, hard2, _ = _schedule_tasks(tasks, now, list(free), amounts2)
+            blocks2, soft2, hard2, _ = _schedule_tasks(tasks, now, list(free), amounts2, key)
             if sum(hard2.values()) < sum(short_hard.values()):
                 blocks, short_soft, short_hard = blocks2, soft2, hard2
                 result.compressed = {tid: amounts[tid] - m for tid, m in compressed.items()}
@@ -325,7 +345,6 @@ def plan(now: datetime, horizon_end: datetime, day_start: time, day_end: time,
                     title = next(t.title for t in tasks if t.id == tid)
                     result.warnings.append(Warning("warn", f"Squeezed {title} by {cut} min to make room", tid))
 
-    by_id = {t.id: t for t in tasks}
     for tid, left in short_soft.items():
         t = by_id[tid]
         if tid not in short_hard and t.effective_due < t.due:
@@ -334,7 +353,8 @@ def plan(now: datetime, horizon_end: datetime, day_start: time, day_end: time,
     short_hard = {tid: left for tid, left in short_hard.items() if by_id[tid].due <= horizon_end}
     for tid, left in short_hard.items():
         t = by_id[tid]
-        result.warnings.append(Warning("danger", f"{t.title} is {left} min short of fitting before {fmt_dt(t.due)}", tid))
+        low = " (low priority, so it gave way)" if t.priority == 3 else ""
+        result.warnings.append(Warning("danger", f"{t.title} is {left} min short of fitting before {fmt_dt(t.due)}{low}", tid))
     result.shortfall = short_hard
     result.blocks += blocks
     result.blocks.sort(key=lambda b: b.start)
