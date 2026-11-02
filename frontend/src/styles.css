@@ -451,5 +451,3 @@ kbd { min-width: 18px; text-align: center; font: 500 11px var(--font); padding: 
 .ev-pin:hover { opacity: 1; background: var(--surface); box-shadow: 0 0 0 1px var(--line-2); }
 .fc-event:hover .ev-pin { right: 24px; }
 .ev.tiny .ev-pin { top: 50%; transform: translateY(-50%); width: 15px; height: 15px; }
-.ev-flag { display: inline-grid; place-items: center; width: 13px; height: 13px; margin-right: 4px; border-radius: 3px; vertical-align: 1px;
-  font-size: 10px; font-weight: 700; line-height: 1; background: var(--danger); color: #fff; }

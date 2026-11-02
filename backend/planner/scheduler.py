@@ -323,8 +323,13 @@ def plan(now: datetime, horizon_end: datetime, day_start: time, day_end: time,
     amounts = {t.id: t.remaining for t in tasks}
     by_id = {t.id: t for t in tasks}
 
-    def cost(hard: dict[int, int]) -> int:  # work due after the planning window doesn't count
-        return sum(left * SHORT_WEIGHT.get(by_id[tid].priority, 10) for tid, left in hard.items() if by_id[tid].due <= horizon_end)
+    def cost(hard: dict[int, int]) -> tuple[int, int]:
+        # First: which tasks miss (a high-priority one counts like ten normal ones). Only then: by how much.
+        # So a small task due today isn't dropped just to shave minutes off work that can't fit anyway.
+        # Work due after the planning window doesn't count.
+        missed = [(tid, left) for tid, left in hard.items() if by_id[tid].due <= horizon_end]
+        return (sum(SHORT_WEIGHT.get(by_id[tid].priority, 10) for tid, _ in missed),
+                sum(left * SHORT_WEIGHT.get(by_id[tid].priority, 10) for tid, left in missed))
     best = None
     for key in ORDERS:
         attempt = _schedule_tasks(tasks, now, list(free), amounts, key)

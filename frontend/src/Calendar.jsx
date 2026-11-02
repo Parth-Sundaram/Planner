@@ -101,7 +101,6 @@ export default function Calendar({ ctx }) {
       <div className={cls} title={`${b.title} · ${arg.timeText}`}>
         {removal(b) && <button type="button" className="ev-del" title={removal(b).label} aria-label={removal(b).label}><Icon name={b.kind === "routine" ? "x" : "trash"} size={11} /></button>}
         <span className="ev-t">{["appointment", "meeting", "class"].includes(cat) && <i className={`ev-ico ${cat === "class" ? "sq" : "dia"}`} />}
-          {b.priority === 1 && cat === "work" && <span className="ev-flag" title="High priority">!</span>}
           {b.title}</span>
         {b.locked && b.status === "planned" && (b.kind === "task" || (b.kind === "routine" && cat === "routine")) && (
           <button type="button" className="ev-pin" title="Pinned here. Click to unpin" aria-label="Unpin"><Icon name="pin" size={11} /></button>

@@ -163,3 +163,17 @@ def test_priority_takes_spare_time_and_low_priority_gives_way():
                                                    spec(2, "Normal", datetime(2026, 11, 4, 11), 90, 2)])
     assert r.shortfall == {1: 90}
     assert any("low priority" in w.message for w in r.warnings)
+
+
+def test_small_task_due_today_isnt_dropped_to_shave_minutes_off_overloaded_work():
+    from datetime import datetime, time
+    from planner import scheduler as S
+    now = datetime(2026, 11, 2, 15, 0)
+    end = datetime(2026, 11, 5, 0, 0)
+    quiz = S.TaskSpec(id=1, title="DB daily quiz", remaining=30, due=datetime(2026, 11, 2, 23, 59),
+                      effective_due=datetime(2026, 11, 2, 23, 59), priority=2, splittable=False, min_block=30)
+    big = S.TaskSpec(id=2, title="Exam prep", remaining=3000, due=datetime(2026, 11, 4, 23, 0),
+                     effective_due=datetime(2026, 11, 4, 23, 0), priority=1, min_block=30)
+    r = S.plan(now, end, time(8), time(23, 59), [], [], [quiz, big])
+    assert any(b.task_id == 1 for b in r.blocks)       # the quiz still happens today
+    assert 1 not in r.shortfall and 2 in r.shortfall    # the impossible one is the one that's short
