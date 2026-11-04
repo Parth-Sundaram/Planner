@@ -302,8 +302,9 @@ def apply_items(db: Session, items: list[dict], cfg: dict, now: datetime) -> dic
             created += course is not None
             suggested += course is None
         else:
-            if (t.due, t.title) != (it["due"], it["title"]):
-                t.due, t.title = it["due"], it["title"]
+            title = t.title if t.title_edited else it["title"]
+            if (t.due, t.title) != (it["due"], title):
+                t.due, t.title = it["due"], title
                 updated += 1
             if course and t.course_id is None:
                 t.course_id, t.course = course.id, course.name

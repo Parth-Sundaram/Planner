@@ -92,3 +92,13 @@ def test_custom_day_repeats_and_materialize(monkeypatch):
     # tonight through the 2-week window (ends Nov 3), skipping Wednesdays and weekends
     assert quizzes == ["2026-10-20T23:59", "2026-10-22T23:59", "2026-10-23T23:59", "2026-10-26T23:59", "2026-10-27T23:59",
                        "2026-10-29T23:59", "2026-10-30T23:59", "2026-11-02T23:59"]
+
+
+def test_repeat_words_inside_a_name_dont_make_it_repeat():
+    from planner.quickadd import parse_when
+    from datetime import datetime
+    now = datetime(2026, 11, 3, 19, 0)
+    for text in ["Weekly databases work due Friday", "DB daily quiz tomorrow", "Monthly report draft by Nov 20"]:
+        assert parse_when(text, now)[1] is None, text
+    for text, rep in [("submit timesheet weekly on Sunday", "weekly:6"), ("gym daily at 7am", "daily"), ("pay rent monthly", "monthly")]:
+        assert parse_when(text, now)[1] == rep, text

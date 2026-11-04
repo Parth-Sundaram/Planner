@@ -32,6 +32,7 @@ class Task(Base):
     source: Mapped[str] = mapped_column(String(50), default="manual")  # manual | google_tasks | scrape:csse304 ...
     external_id: Mapped[str | None] = mapped_column(String(300), unique=True)
     needs_estimate: Mapped[bool] = mapped_column(Boolean, default=False)  # imported with a default duration
+    title_edited: Mapped[bool] = mapped_column(Boolean, default=False)    # you renamed it, so syncing keeps your name
     notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     # Subtasks: a task with a parent is a step of that parent. Parents with open subtasks

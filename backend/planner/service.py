@@ -303,6 +303,25 @@ def check_in(db: Session, block_id: int, status: str, minutes: int | None = None
     replan(db)
 
 
+def change_repeat(db: Session, t: Task, repeat: str | None) -> int:
+    """Changing how a task repeats (or making it one-off) clears the copies already made ahead of
+    time that you haven't started, so they don't pile up. Returns how many were removed."""
+    series = t.series_id or t.id
+    removed = 0
+    for x in db.scalars(select(Task).where((Task.series_id == series) | (Task.id == series))):
+        if x.id == t.id:
+            continue
+        if x.due > t.due and x.status == "open" and not x.done_minutes:
+            for b in db.scalars(select(Block).where(Block.task_id == x.id)):
+                db.delete(b)
+            db.delete(x)
+            removed += 1
+        else:
+            x.repeat = None  # earlier ones stay as they were, but stop generating more
+    t.repeat = repeat
+    return removed
+
+
 def spawn_next(db: Session, t: Task) -> Task | None:
     """When a repeating task is finished, create the next one (once)."""
     from .quickadd import next_due
@@ -345,6 +364,16 @@ def finish_task(db: Session, task_id: int) -> None:
                                    Block.start >= local_now(db)))
     _close_parent_if_finished(db, t)
     replan(db)
+
+
+def retitle_blocks(db: Session, t: Task) -> None:
+    """After a rename, blocks already on the calendar (pinned, done, in progress) show the new name too."""
+    parent = db.get(Task, t.parent_id) if t.parent_id else None
+    for b in db.scalars(select(Block).where(Block.task_id == t.id)):
+        b.title = f"{parent.title} › {t.title}" if parent else t.title
+    for c in subtasks_of(db, t.id):
+        for b in db.scalars(select(Block).where(Block.task_id == c.id)):
+            b.title = f"{t.title} › {c.title}"
 
 
 def subtasks_of(db: Session, parent_id: int) -> list[Task]:

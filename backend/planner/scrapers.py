@@ -397,8 +397,9 @@ def sync_items(db: Session, items: list[Item], now: datetime, review: bool = Fal
         else:
             if course_id and t.course_id is None:
                 t.course_id = course_id
-            if (t.due, t.title) != (it.due, it.title):
-                t.due, t.title = it.due, it.title
+            title = t.title if t.title_edited else it.title
+            if (t.due, t.title) != (it.due, title):
+                t.due, t.title = it.due, title
                 updated += 1
     db.commit()
     return {"created": 0 if review else created, "suggested": created if review else 0, "updated": updated}

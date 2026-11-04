@@ -350,7 +350,7 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
     def update_task(tid):
         t = g.db.get(Task, tid) or abort(404)
         data = request.get_json(force=True)
-        old_due, old_status = t.due, t.status
+        old_due, old_status, old_title = t.due, t.status, t.title
         import re as _re
         if "repeat" in data and data["repeat"] not in (None, "", "daily", "weekdays", "biweekly", "monthly") \
                 and not str(data["repeat"]).startswith("weekly") \
@@ -358,11 +358,17 @@ def create_app(database_url: str | None = None, testing: bool = False) -> Flask:
             return jsonify(error="repeat must be daily, weekdays, weekly, biweekly, monthly or days:MTWRF"), 400
         if data.get("repeat") == "weekly":
             data["repeat"] = f"weekly:{t.due.weekday()}"
+        old_repeat = t.repeat
         apply_task_fields(t, data)
         if t.repeat == "":
             t.repeat = None
+        if "repeat" in data and t.repeat != old_repeat:
+            service.change_repeat(g.db, t, t.repeat)
         if old_status != "done" and t.status == "done":
             service.spawn_next(g.db, t)
+        if t.title != old_title:
+            t.title_edited = True
+            service.retitle_blocks(g.db, t)
         if "due" in data and t.due != old_due:
             # Steps that were following the parent's deadline move with it.
             for c in service.subtasks_of(g.db, t.id):

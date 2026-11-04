@@ -33,12 +33,14 @@ def _days_repeat(m) -> str:
 REPEAT = [
     # "every Mon, Tue, Thu and Fri" / "every mon tue thu fri"
     (re.compile(rf"\bevery\s+{_WD}(?:\s*(?:,|and|&|/)?\s*{_WD})+\b", re.I), _days_repeat),
-    (re.compile(r"\bevery\s*(?:week)?day\b|\bweekdays\b", re.I), lambda m: "weekdays"),
+    (re.compile(r"\bevery\s*(?:week)?day\b|\bweekdays\b(?=\s*(?:$|[,.;!~#]|\b(?:at|on|by|until|from|before|after|in|for|starting)\b))", re.I), lambda m: "weekdays"),
     (re.compile(rf"\bevery\s+{_WD}\b", re.I), lambda m: f"weekly:{WEEKDAYS[m.group(1).lower()]}"),
-    (re.compile(r"\b(?:every\s+day|daily)\b", re.I), lambda m: "daily"),
-    (re.compile(r"\b(?:every\s+week|weekly)\b", re.I), lambda m: "weekly"),
-    (re.compile(r"\b(?:every\s+other\s+week|biweekly)\b", re.I), lambda m: "biweekly"),
-    (re.compile(r"\b(?:every\s+month|monthly)\b", re.I), lambda m: "monthly"),
+    # A bare "daily"/"weekly" only means a repeat at the end of the phrase ("timesheet weekly",
+    # "gym daily at 7"), not as part of a name ("Weekly databases work", "daily quiz").
+    (re.compile(r"\bevery\s+day\b|\bdaily\b(?=\s*(?:$|[,.;!~#]|\b(?:at|on|by|until|from|before|after|in|for|starting)\b))", re.I), lambda m: "daily"),
+    (re.compile(r"\bevery\s+week\b|\bweekly\b(?=\s*(?:$|[,.;!~#]|\b(?:at|on|by|until|from|before|after|in|for|starting)\b))", re.I), lambda m: "weekly"),
+    (re.compile(r"\bevery\s+other\s+week\b|\bbiweekly\b(?=\s*(?:$|[,.;!~#]|\b(?:at|on|by|until|from|before|after|in|for|starting)\b))", re.I), lambda m: "biweekly"),
+    (re.compile(r"\bevery\s+month\b|\bmonthly\b(?=\s*(?:$|[,.;!~#]|\b(?:at|on|by|until|from|before|after|in|for|starting)\b))", re.I), lambda m: "monthly"),
 ]
 
 # Rough default durations, minutes. First match wins, so specific phrases go first.

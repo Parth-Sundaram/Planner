@@ -100,3 +100,42 @@ def test_keep_free_slot_stays_empty_and_pins_can_be_undone(client):
     client.post(f"/api/blocks/{blk['id']}/unlock?replan=0")
     d = blocks(client)
     assert d["dirty"] and not next(x for x in d["blocks"] if x["id"] == blk["id"])["locked"]
+
+
+def test_rename_sticks_through_sync_and_updates_pinned_blocks(client):
+    from planner import scrapers
+    from planner.models import Task, make_session_factory
+    t = client.post("/api/tasks", json={"title": "Very long scraped title about CNN part four", "due": "2026-10-30T17:00",
+                                        "est_minutes": 60}).get_json()["task"]
+    blk = next(x for x in blocks(client)["blocks"] if x["task_id"] == t["id"])
+    client.patch(f"/api/blocks/{blk['id']}", json={"start": "2026-10-29T09:00", "end": "2026-10-29T10:00"})  # pinned
+    client.patch(f"/api/tasks/{t['id']}", json={"title": "CNN 4"})
+    assert next(x for x in blocks(client)["blocks"] if x["id"] == blk["id"])["title"] == "CNN 4"
+
+
+def test_sync_keeps_a_renamed_title():
+    from datetime import datetime
+    from planner import scrapers
+    from planner.models import Task, make_session_factory
+    db = make_session_factory("sqlite://")()
+    now = datetime(2026, 10, 28, 8, 0)
+    item = scrapers.Item("csse313:cnn4", "Very long scraped title about CNN part four", datetime(2026, 10, 30, 23, 59), "AI", "assignment", 120)
+    scrapers.sync_items(db, [item], now)
+    t = db.query(Task).one()
+    t.title, t.title_edited = "CNN 4", True
+    db.commit()
+    scrapers.sync_items(db, [item], now)
+    assert db.query(Task).one().title == "CNN 4"
+
+
+def test_switching_to_once_removes_the_copies_made_ahead(client):
+    t = client.post("/api/tasks", json={"title": "Timesheet", "due": "2026-10-30T17:00", "est_minutes": 15, "repeat": "weekly"}).get_json()["task"]
+    client.post("/api/replan")
+    tasks = client.get("/api/tasks").get_json()
+    tasks = tasks["tasks"] if isinstance(tasks, dict) else tasks
+    assert sum(1 for x in tasks if x["title"] == "Timesheet") > 1      # copies for the next weeks
+    client.patch(f"/api/tasks/{t['id']}", json={"repeat": ""})
+    tasks = client.get("/api/tasks").get_json()
+    tasks = tasks["tasks"] if isinstance(tasks, dict) else tasks
+    left = [x for x in tasks if x["title"] == "Timesheet"]
+    assert len(left) == 1 and not left[0]["repeat"]
